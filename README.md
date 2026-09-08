@@ -105,7 +105,8 @@ src/enerdat/
     entsoe.py       day-ahead forecast, actual generation, imbalance price
     weather.py      archived forecasts at each wind site
     marts.py        the point-in-time join
-    settlement.py   forecast error priced at the imbalance price
+    model.py        walk-forward candidate forecast
+    settlement.py   both schedules priced at the imbalance price
   checks.py         leakage, market-day length, interval uniqueness
 tests/
   fixtures/            real API payloads captured 2026-09-07
@@ -113,7 +114,31 @@ tests/
   test_mart.py         revision dedup, capacity weighting, leakage detection
   test_entsoe_payloads.py  parsing, against real responses
   test_settlement.py   settlement sign conventions
+  test_model.py        walk-forward causality
 ```
+
+## The candidate model
+
+The modelling is deliberately unremarkable — gradient boosting on hub-height
+wind speed. What matters is *when* the model is allowed to learn things.
+
+A single fit scored on a random split would leak: predicting January with a
+model that saw July is not a forecast. So `walk_forward_predict` walks forward.
+For delivery day D the model may only have seen intervals whose actuals were
+**published** before D's gate closure — gate closure minus
+`ACTUALS_PUBLICATION_LAG`, because realised generation is not knowable the
+instant it occurs.
+
+It returns an audit trail, not just predictions: one row per delivery day
+recording that day's cutoff and the latest interval actually trained on.
+`test_training_never_reaches_past_the_cutoff` asserts the second never exceeds
+the first. Where history is too short the model **abstains and emits NULL**
+rather than a prediction nobody should trust.
+
+`USE_TSO_FORECAST_AS_FEATURE` is `False` on purpose. Article 14.1.D forecasts
+are published by 18:00 on D−1, *after* the 12:00 gate closure this project
+treats as the decision point. We therefore beat the TSO using strictly less
+information than it had — which costs accuracy, but makes a win unambiguous.
 
 ## Settlement
 
@@ -125,9 +150,15 @@ the difference between this and the same settlement run on your schedule.
     long  (> 0) -> settled at the Long price
     short (< 0) -> settled at the Short price
 
-Cost is not a function of `|error|`. Being long into a *negative* price means
-paying to deliver, which is exactly where a renewables portfolio lands when
-everyone's wind over-produces at once. `test_settlement.py` pins that case.
+Cost is not a function of `|error|`, which is why MAE is the wrong objective
+here. Being long into a *negative* price means paying to deliver. And a
+schedule can be wrong by four times as much as the TSO's yet settle cheaper, by
+being wrong in the long direction while the TSO is short — `test_settlement.py`
+pins both cases.
+
+`savings_eur` is the headline: baseline cost minus candidate cost, per interval.
+Negative means the candidate lost, and it is reported as a loss rather than an
+absolute value.
 
 The settlement period is derived from the data rather than assumed, because the
 market moved to quarter-hourly MTU mid-history and DST days contain an interval

@@ -49,6 +49,32 @@ GATE_CLOSURE_LOCAL = dt.time(12, 0)
 # in checks.py proves it rather than trusting this comment.
 WEATHER_LEAD_DAYS = 2
 
+# --- model ---
+
+# Actuals are not knowable the instant they occur: ENTSO-E publishes realised
+# generation with a lag. Training for delivery day D may therefore only use
+# intervals whose actuals had been published by D's gate closure.
+ACTUALS_PUBLICATION_LAG = dt.timedelta(hours=1)
+
+# Walk-forward retraining cadence, in days. Refitting for every delivery day is
+# the purest form but costs a fit per day over a multi-year backfill; refitting
+# monthly stays strictly causal and runs in reasonable time.
+MODEL_RETRAIN_DAYS = 30
+
+# Below this many training intervals the model abstains and emits NULL rather
+# than a prediction nobody should trust.
+MIN_TRAIN_INTERVALS = 2_000
+
+# Whether the TSO's own day-ahead forecast may be used as a model feature.
+#
+# False, deliberately. Article 14.1.D forecasts are published by 18:00 on D-1,
+# which is AFTER the 12:00 day-ahead gate closure this project treats as the
+# decision point. Using it would mean predicting with information the schedule
+# could not have contained. The cost is real -- the TSO forecast is a strong
+# feature and we are beating it with strictly less information than it had --
+# but a win under this rule is unambiguous, and a loss is explicable.
+USE_TSO_FORECAST_AS_FEATURE = False
+
 # --- weather sampling --------------------------------------------------------
 
 # Dutch offshore wind sites. A handful of real locations beats a national

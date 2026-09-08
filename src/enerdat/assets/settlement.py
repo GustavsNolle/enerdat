@@ -29,7 +29,25 @@ from dagster_duckdb import DuckDBResource
 from enerdat.config import TARGET_TECHNOLOGY, ZONE
 from enerdat.resources import LakeResource
 
-SETTLEMENT_SQL = """
+
+def _settle(schedule: str, prefix: str) -> str:
+    """Settlement columns for one schedule. Same arithmetic for every schedule,
+    so the baseline and the candidate can never drift apart."""
+    dev = f"(p.actual_mw - p.{schedule})"
+    guard = f"p.actual_mw IS NULL OR p.{schedule} IS NULL"
+    return f"""
+    {dev} * p.interval_hours                                 AS {prefix}_imbalance_mwh,
+    CASE WHEN {guard} THEN NULL
+         WHEN {dev} >= 0 THEN {dev} * p.interval_hours * pr.price_long
+         ELSE                 {dev} * p.interval_hours * pr.price_short
+    END                                                      AS {prefix}_settlement_eur,
+    CASE WHEN {guard} THEN NULL
+         WHEN {dev} >= 0 THEN -({dev} * p.interval_hours * pr.price_long)
+         ELSE                 -({dev} * p.interval_hours * pr.price_short)
+    END                                                      AS {prefix}_cost_eur"""
+
+
+SETTLEMENT_SQL = f"""
 CREATE OR REPLACE TABLE imbalance_settlement AS
 WITH prices AS (
     SELECT
@@ -59,7 +77,7 @@ paced AS (
             ) / 3600.0,
             0.25
         ) AS interval_hours
-    FROM forecast_error
+    FROM candidate_forecast
 )
 SELECT
     p.valid_time_utc,
@@ -67,21 +85,27 @@ SELECT
     p.interval_hours,
     p.actual_mw,
     p.tso_forecast_mw,
+    p.candidate_mw,
     pr.price_long,
     pr.price_short,
-    (p.actual_mw - p.tso_forecast_mw) * p.interval_hours   AS tso_imbalance_mwh,
+    {_settle("tso_forecast_mw", "tso")},
+    {_settle("candidate_mw", "candidate")},
+    -- The headline. Positive means the candidate schedule cost less to settle
+    -- than the TSO's own forecast would have.
     CASE
-        WHEN p.actual_mw IS NULL OR p.tso_forecast_mw IS NULL THEN NULL
-        WHEN (p.actual_mw - p.tso_forecast_mw) >= 0
-            THEN (p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_long
-        ELSE (p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_short
-    END                                                    AS tso_settlement_eur,
-    CASE
-        WHEN p.actual_mw IS NULL OR p.tso_forecast_mw IS NULL THEN NULL
-        WHEN (p.actual_mw - p.tso_forecast_mw) >= 0
-            THEN -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_long)
-        ELSE -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_short)
-    END                                                    AS tso_cost_eur
+        WHEN p.candidate_mw IS NULL THEN NULL
+        ELSE (
+            CASE WHEN (p.actual_mw - p.tso_forecast_mw) >= 0
+                 THEN -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_long)
+                 ELSE -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_short)
+            END
+            -
+            CASE WHEN (p.actual_mw - p.candidate_mw) >= 0
+                 THEN -((p.actual_mw - p.candidate_mw) * p.interval_hours * pr.price_long)
+                 ELSE -((p.actual_mw - p.candidate_mw) * p.interval_hours * pr.price_short)
+            END
+        )
+    END                                                      AS savings_eur
 FROM paced AS p
 LEFT JOIN prices AS pr USING (valid_time_utc)
 ORDER BY p.valid_time_utc
@@ -94,7 +118,7 @@ def _has_files(glob: str) -> bool:
 
 
 @dg.asset(
-    deps=["forecast_error_mart", "entsoe_imbalance_price"],
+    deps=["candidate_forecast", "entsoe_imbalance_price"],
     group_name="marts",
     kinds={"duckdb", "sql"},
     description=(
@@ -125,8 +149,9 @@ def imbalance_settlement_mart(
             rows,
             priced,
             cost,
-            mwh_short,
-            mwh_long,
+            candidate_cost,
+            savings,
+            scored,
             days,
         ) = connection.execute(
             """
@@ -134,18 +159,20 @@ def imbalance_settlement_mart(
                 count(*),
                 count(tso_cost_eur),
                 sum(tso_cost_eur),
-                sum(tso_imbalance_mwh) FILTER (WHERE tso_imbalance_mwh < 0),
-                sum(tso_imbalance_mwh) FILTER (WHERE tso_imbalance_mwh > 0),
+                sum(candidate_cost_eur),
+                sum(savings_eur),
+                count(savings_eur),
                 count(DISTINCT delivery_date)
             FROM imbalance_settlement
             """
         ).fetchone()
 
     cost = cost or 0.0
-    per_day = cost / days if days else 0.0
+    savings = savings or 0.0
+    scored_days = max(scored / 96, 1) if scored else 1
     context.log.info(
-        f"baseline imbalance cost {cost:,.0f} EUR over {days} day(s) "
-        f"({per_day:,.0f} EUR/day)"
+        f"baseline {cost:,.0f} EUR over {days} day(s); "
+        f"candidate saves {savings:,.0f} EUR on {scored} scored intervals"
     )
 
     return dg.MaterializeResult(
@@ -154,10 +181,14 @@ def imbalance_settlement_mart(
             "technology": TARGET_TECHNOLOGY,
             "intervals": rows,
             "intervals_priced": priced,
-            "baseline_cost_eur": round(cost, 2),
-            "baseline_cost_eur_per_day": round(per_day, 2),
-            "mwh_short": round(mwh_short or 0.0, 1),
-            "mwh_long": round(mwh_long or 0.0, 1),
+            "intervals_scored": scored,
             "days": days,
+            "baseline_cost_eur": round(cost, 2),
+            "candidate_cost_eur": round(candidate_cost or 0.0, 2),
+            "savings_eur": round(savings, 2),
+            # Annualised, so it is comparable across backfill lengths. Still
+            # divide by installed MW before quoting it as EUR/MW/year.
+            "savings_eur_per_year": round(savings / scored_days * 365, 2),
+            "candidate_beats_tso": savings > 0,
         }
     )
