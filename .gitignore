@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — the ENTSO-E API key lives here
+.env
+
+# Cached ENTSO-E API responses (regenerated on demand)
+.entsoe_cache/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Dagster
+.dagster_home/
+.tmp_dagster_home_*/
+
+# Data lake and warehouse (rebuildable from the API)
+data/

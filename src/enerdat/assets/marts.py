@@ -1,0 +1,155 @@
+"""The point-in-time mart: one row per market interval, no future information."""
+
+from pathlib import Path
+
+import dagster as dg
+from dagster import AssetExecutionContext
+from dagster_duckdb import DuckDBResource
+
+from enerdat.config import (
+    TARGET_TECHNOLOGY,
+    WEATHER_LEAD_DAYS,
+    WEATHER_VARIABLES,
+    ZONE,
+)
+from enerdat.resources import LakeResource
+
+# Capacity-weighted mean per variable, plus the issue time of the run each
+# feature came from. Written out explicitly rather than with PIVOT: PIVOT has
+# to enumerate its columns at bind time, which DuckDB cannot do in a statement
+# that also carries parameters -- and an explicit list gives a stable schema
+# that does not shift when a variable stops being reported.
+_WEATHER_COLUMNS = ",\n        ".join(
+    f"""sum(CASE WHEN w.variable = '{v}' THEN w.value * w.weight END)
+            / nullif(sum(CASE WHEN w.variable = '{v}' THEN w.weight END), 0)
+                                                             AS {v}_v,
+        max(CASE WHEN w.variable = '{v}' THEN w.issue_time_utc END)
+                                                             AS {v}_issued"""
+    for v in WEATHER_VARIABLES
+)
+
+# Deduplication is the whole bitemporal story in one clause: the raw layer holds
+# every retrieval of every interval, and the mart takes the most recent one.
+# Swap DESC for a `WHERE retrieved_at_utc <= <as_of>` to reconstruct what was
+# known on any past date.
+_LATEST = (
+    "QUALIFY row_number() OVER "
+    "(PARTITION BY valid_time_utc ORDER BY retrieved_at_utc DESC) = 1"
+)
+
+MART_SQL = f"""
+CREATE OR REPLACE TABLE forecast_error AS
+WITH tso_forecast AS (
+    SELECT valid_time_utc, value AS tso_forecast_mw
+    FROM read_parquet($forecast_glob)
+    WHERE variable = $technology
+    {_LATEST}
+),
+actual AS (
+    SELECT valid_time_utc, value AS actual_mw
+    FROM read_parquet($actual_glob)
+    WHERE variable = $technology
+    {_LATEST}
+),
+weather AS (
+    SELECT
+        w.valid_time_utc,
+        {_WEATHER_COLUMNS}
+    FROM read_parquet($weather_glob) AS w
+    GROUP BY w.valid_time_utc
+)
+SELECT
+    f.valid_time_utc,
+    timezone('Europe/Brussels', f.valid_time_utc)::DATE      AS delivery_date,
+    -- gate closure: 12:00 market time on D-1, expressed back in UTC
+    timezone(
+        'Europe/Brussels',
+        (timezone('Europe/Brussels', f.valid_time_utc)::DATE
+         - INTERVAL 1 DAY) + INTERVAL 12 HOUR
+    )                                                        AS gate_closure_utc,
+    f.tso_forecast_mw,
+    a.actual_mw,
+    a.actual_mw - f.tso_forecast_mw                          AS tso_error_mw,
+    w.* EXCLUDE (valid_time_utc),
+    $lead_days                                               AS weather_lead_days
+FROM tso_forecast AS f
+LEFT JOIN actual  AS a USING (valid_time_utc)
+LEFT JOIN weather AS w
+       ON w.valid_time_utc = date_trunc('hour', f.valid_time_utc)
+ORDER BY f.valid_time_utc
+"""
+
+
+def _has_files(glob: str) -> bool:
+    root = Path(glob.split("**")[0])
+    return root.exists() and any(root.rglob("*.parquet"))
+
+
+@dg.asset(
+    deps=[
+        "entsoe_day_ahead_forecast",
+        "entsoe_actual_generation",
+        "openmeteo_archived_forecast",
+    ],
+    group_name="marts",
+    kinds={"duckdb", "sql"},
+    description=(
+        "One row per market interval for the target technology: the TSO's "
+        "day-ahead forecast, what actually happened, and capacity-weighted "
+        "weather features from a model run that predates gate closure. "
+        "Weather is hourly and ENTSO-E is 15-minute, so features are held "
+        "constant within the hour -- an explicit choice, not an accident."
+    ),
+)
+def forecast_error_mart(
+    context: AssetExecutionContext,
+    duckdb: DuckDBResource,
+    lake: LakeResource,
+) -> dg.MaterializeResult:
+    globs = {
+        "forecast_glob": lake.glob("entsoe_day_ahead_forecast"),
+        "actual_glob": lake.glob("entsoe_actual_generation"),
+        "weather_glob": lake.glob("openmeteo_archived_forecast"),
+    }
+
+    missing = [name for name, g in globs.items() if not _has_files(g)]
+    if missing:
+        raise dg.Failure(
+            description=(
+                f"No landed parquet for: {', '.join(missing)}. Materialise the "
+                "raw assets for at least one partition first."
+            )
+        )
+
+    with duckdb.get_connection() as connection:
+        connection.execute(
+            MART_SQL,
+            {
+                **globs,
+                "technology": TARGET_TECHNOLOGY,
+                "lead_days": WEATHER_LEAD_DAYS,
+            },
+        )
+        rows, first, last, matched = connection.execute(
+            """
+            SELECT count(*),
+                   min(valid_time_utc),
+                   max(valid_time_utc),
+                   count(actual_mw)
+            FROM forecast_error
+            """
+        ).fetchone()
+
+    context.log.info(f"forecast_error: {rows} intervals, {matched} with an actual")
+
+    return dg.MaterializeResult(
+        metadata={
+            "zone": ZONE,
+            "technology": TARGET_TECHNOLOGY,
+            "rows": rows,
+            "intervals_with_actual": matched,
+            "first_interval_utc": str(first),
+            "last_interval_utc": str(last),
+            "weather_lead_days": WEATHER_LEAD_DAYS,
+        }
+    )

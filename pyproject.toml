@@ -1,0 +1,35 @@
+[project]
+name = "enerdat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster>=1.13.21",
+    "dagster-duckdb>=0.29.21",
+    "dagster-webserver>=1.13.21",
+    "duckdb>=1.5.5",
+    "entsoe-py>=0.8.1",
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.11.1",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.1",
+    "python-dotenv>=1.2.3",
+]
+
+[tool.dagster]
+module_name = "enerdat.definitions"
+code_location_name = "enerdat"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/enerdat"]
