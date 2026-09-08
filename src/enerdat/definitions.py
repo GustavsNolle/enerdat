@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
+
 import dagster as dg
 from dagster_duckdb import DuckDBResource
 from dotenv import load_dotenv
 
 from enerdat import checks
-from enerdat.assets import entsoe, marts, weather
+from enerdat.assets import entsoe, marts, settlement, weather
 from enerdat.config import DUCKDB_PATH, LAKE_ROOT, OPEN_METEO_MODEL
 from enerdat.partitions import daily_partitions
 from enerdat.resources import EntsoeResource, LakeResource, OpenMeteoResource
@@ -15,7 +17,7 @@ from enerdat.resources import EntsoeResource, LakeResource, OpenMeteoResource
 load_dotenv()
 
 raw_assets = dg.load_assets_from_modules([entsoe, weather])
-mart_assets = dg.load_assets_from_modules([marts])
+mart_assets = dg.load_assets_from_modules([marts, settlement])
 
 # Raw ingestion is one API call per partition, so a backfill is a long queue of
 # small requests. ENTSO-E allows 400/minute and throttles hard above it; the
@@ -52,7 +54,10 @@ defs = dg.Definitions(
         )
     ],
     resources={
-        "entsoe": EntsoeResource(api_key=dg.EnvVar("ENTSOE_API_KEY")),
+        "entsoe": EntsoeResource(
+            api_key=dg.EnvVar("ENTSOE_API_KEY"),
+            endpoint_url=os.getenv("ENTSOE_ENDPOINT_URL", ""),
+        ),
         "open_meteo": OpenMeteoResource(model=OPEN_METEO_MODEL),
         "lake": LakeResource(root=LAKE_ROOT),
         "duckdb": DuckDBResource(database=DUCKDB_PATH),

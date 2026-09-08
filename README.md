@@ -49,6 +49,24 @@ interval via `QUALIFY row_number()`. Change that clause to
 `WHERE retrieved_at_utc <= <as_of>` and you can reconstruct what was known on any
 past date.
 
+## If ENTSO-E returns 404
+
+The Transparency Platform has moved its API host before. On 2026-09-08 the
+legacy `web-api.tp.entsoe.eu` began returning `404 page not found` for every
+route — including unauthenticated ones, which is a routing failure rather than
+an auth one — while the portal stayed up. `entsoe-py` still defaults to that
+host, so the client breaks with it.
+
+Nothing here needs a code change for that. Repoint it:
+
+```bash
+export ENTSOE_ENDPOINT_URL=https://<current-host>/api
+```
+
+`EntsoeResource` fails fast on 404 with that instruction rather than burning
+four retries on a route that will never resolve, and distinguishes it from
+401/403, which means the key rather than the endpoint.
+
 ## Setup
 
 ```bash
@@ -87,11 +105,33 @@ src/enerdat/
     entsoe.py       day-ahead forecast, actual generation, imbalance price
     weather.py      archived forecasts at each wind site
     marts.py        the point-in-time join
+    settlement.py   forecast error priced at the imbalance price
   checks.py         leakage, market-day length, interval uniqueness
 tests/
-  test_partitions.py  23- and 25-hour days
-  test_mart.py        revision dedup, capacity weighting, leakage detection
+  fixtures/            real API payloads captured 2026-09-07
+  test_partitions.py   23- and 25-hour days
+  test_mart.py         revision dedup, capacity weighting, leakage detection
+  test_entsoe_payloads.py  parsing, against real responses
+  test_settlement.py   settlement sign conventions
 ```
+
+## Settlement
+
+`imbalance_settlement_mart` prices the TSO's own forecast error interval by
+interval — the baseline any candidate model has to beat. The headline number is
+the difference between this and the same settlement run on your schedule.
+
+    imbalance_mwh = (actual - scheduled) * interval_hours
+    long  (> 0) -> settled at the Long price
+    short (< 0) -> settled at the Short price
+
+Cost is not a function of `|error|`. Being long into a *negative* price means
+paying to deliver, which is exactly where a renewables portfolio lands when
+everyone's wind over-produces at once. `test_settlement.py` pins that case.
+
+The settlement period is derived from the data rather than assumed, because the
+market moved to quarter-hourly MTU mid-history and DST days contain an interval
+of a different length.
 
 ## Notes on the data
 

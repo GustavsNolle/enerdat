@@ -23,8 +23,20 @@ class EntsoeResource(dg.ConfigurableResource):
     max_attempts: int = 4
     backoff_seconds: float = 2.0
 
+    # Override the API host without touching entsoe-py. ENTSO-E has moved this
+    # endpoint before -- on 2026-09-08 the legacy web-api host began returning
+    # 404 for every route, including unauthenticated ones -- and the client
+    # library lagged the change. Set ENTSOE_ENDPOINT_URL to repoint.
+    endpoint_url: str = ""
+
     def client(self):
+        import entsoe.entsoe as entsoe_module
         from entsoe import EntsoePandasClient
+
+        if self.endpoint_url:
+            # Read per-request from the module global, so patching it here
+            # takes effect for every call this client makes.
+            entsoe_module.URL = self.endpoint_url
 
         return EntsoePandasClient(api_key=self.api_key)
 
@@ -37,12 +49,35 @@ class EntsoeResource(dg.ConfigurableResource):
         """
         from entsoe.exceptions import NoMatchingDataError
 
+        import requests
+
         last: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
                 return getattr(self.client(), method)(*args, **kwargs)
             except NoMatchingDataError:
                 return None
+            except requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", None)
+                if status in (401, 403):
+                    raise RuntimeError(
+                        f"{method}: ENTSO-E rejected the API key ({status}). "
+                        "Check ENTSOE_API_KEY and that the key has web-API "
+                        "access enabled."
+                    ) from exc
+                if status == 404:
+                    # A routing failure, not a transient one: retrying it just
+                    # burns four minutes before failing anyway. 404 on an
+                    # unauthenticated route means the endpoint moved.
+                    current = self.endpoint_url or "entsoe-py default"
+                    raise RuntimeError(
+                        f"{method}: ENTSO-E returned 404 for the API route "
+                        f"({current}). The endpoint has moved -- set "
+                        "ENTSOE_ENDPOINT_URL to the current host."
+                    ) from exc
+                last = exc
+                if attempt < self.max_attempts:
+                    time.sleep(self.backoff_seconds * attempt)
             except Exception as exc:  # noqa: BLE001 - retry everything else
                 last = exc
                 if attempt < self.max_attempts:

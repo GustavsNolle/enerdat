@@ -35,6 +35,24 @@ def _to_long(
     return long
 
 
+def _net_generation(frame: pd.DataFrame) -> pd.DataFrame:
+    """Flatten entsoe-py's (technology, direction) columns to net generation.
+
+    Zones with pumped storage or grid batteries report both directions, so a
+    storage technology can legitimately net negative over an interval.
+    """
+    if not isinstance(frame.columns, pd.MultiIndex):
+        return frame
+
+    levels = frame.columns.get_level_values(1)
+    aggregated = frame.xs("Actual Aggregated", axis=1, level=1)
+    if "Actual Consumption" not in levels:
+        return aggregated
+
+    consumption = frame.xs("Actual Consumption", axis=1, level=1)
+    return aggregated.sub(consumption, fill_value=0)
+
+
 def _materialise(
     context: AssetExecutionContext,
     lake: LakeResource,
@@ -112,16 +130,8 @@ def entsoe_actual_generation(
     start, end = delivery_window(context.partition_key)
     frame = entsoe.fetch("query_generation", ZONE, start=start, end=end, psr_type=None)
 
-    if frame is not None and isinstance(frame.columns, pd.MultiIndex):
-        # Zones with pumped storage report (technology, direction) pairs.
-        # Net = aggregated generation minus consumption.
-        levels = frame.columns.get_level_values(1)
-        aggregated = frame.xs("Actual Aggregated", axis=1, level=1)
-        if "Actual Consumption" in levels:
-            consumption = frame.xs("Actual Consumption", axis=1, level=1)
-            frame = aggregated.sub(consumption, fill_value=0)
-        else:
-            frame = aggregated
+    if frame is not None:
+        frame = _net_generation(frame)
 
     return _materialise(context, lake, "entsoe_actual_generation", frame)
 
