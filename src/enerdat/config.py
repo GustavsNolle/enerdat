@@ -229,6 +229,32 @@ USE_TSO_FORECAST_AS_FEATURE = True
 # causal as everything else.
 MODEL_OBJECTIVE = "euros"
 
+# Weight training samples by how expensive an error at that interval was.
+#
+# The decomposition that motivates this: settlement cost splits into
+#
+#     mean(deviation) x mean(spread)   +   cov(deviation, spread)
+#
+# and on BE the first term is 0.8% of the total. A 37 MW standing bias costs
+# about 150k against a 19.5m bill, because the mean spread is only 0.62 EUR/MWh.
+# Essentially all cost is COVARIANCE -- whether errors land on expensive
+# intervals -- which is a quantity neither squared error nor the quantile
+# objective has ever targeted.
+#
+# Minimising cost directly is not available: under single pricing cost is
+# linear in the schedule and its optimum is degenerate. Re-weighting a proper
+# loss is, and it aims at the right thing -- be accurate where being wrong is
+# expensive, and spend less effort where it is cheap.
+#
+# Weights come from realised spreads in the training window only, so this stays
+# as causal as everything else. The spread for the interval being predicted is
+# unknown at decision time and is never used.
+COST_WEIGHTED_TRAINING = True
+
+# Spreads are heavy-tailed, so a handful of intervals would otherwise dominate
+# the fit entirely. Winsorise before normalising.
+COST_WEIGHT_CLIP_QUANTILE = 0.99
+
 # Bounds on the estimated tau. A window where prices went one-sided can imply a
 # degenerate quantile; clamping keeps the schedule sane.
 TAU_BOUNDS = (0.05, 0.95)

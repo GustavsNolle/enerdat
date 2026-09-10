@@ -224,6 +224,46 @@ price, not by their size. Against the right baseline for an intraday forecast �
 persistence, not the day-ahead TSO forecast — the model buys accuracy and no
 value.
 
+### Targeting the covariance directly
+
+The decomposition says where to aim. Splitting cost into
+`mean(deviation) × mean(spread)` + covariance, on BE:
+
+| schedule | bias MW | bias term €m | corr term €m | cost €m |
+| --- | --- | --- | --- | --- |
+| TSO forecast | −37.4 | −0.15 | +19.67 | 19.52 |
+| persistence T−2h | −0.2 | −0.00 | +17.11 | 17.11 |
+| model, unweighted | −4.8 | −0.02 | +17.42 | 17.40 |
+
+**The bias term is 0.8% of the total.** BE's mean spread is +0.62 €/MWh, so a
+37 MW standing bias costs ~€150k against a €19.5m bill — which is why removing
+it at day-ahead bought MAE parity and no euros. Essentially all cost is
+covariance: whether errors land on expensive intervals. Neither squared error
+nor the quantile objective has ever targeted that.
+
+Minimising cost directly is unavailable — under single pricing it is linear in
+the schedule and degenerate. But **re-weighting a proper loss** is, and it aims
+at the right quantity: `COST_WEIGHTED_TRAINING` weights each training sample by
+|day-ahead − imbalance|, winsorised and normalised, from the training window
+only.
+
+| schedule | MAE MW | corr term €m | cost €m | vs TSO |
+| --- | --- | --- | --- | --- |
+| TSO forecast | 164.7 | +19.67 | 19.52 | — |
+| persistence T−2h | 165.6 | +17.11 | 17.11 | +2.41 |
+| model, unweighted | **137.3** | +17.42 | 17.40 | +2.12 |
+| **model, cost-weighted** | 141.6 | **+16.37** | **16.34** | **+3.18** |
+| perfect foresight | 0.0 | 0.00 | 0.00 | +19.52 |
+
+**It works by making the forecast worse.** MAE rises 137.3 → 141.6 while cost
+falls €1.06m, and the gain is entirely in the covariance term. This is the first
+schedule in the project to beat naive persistence (+€3.18m against +€2.41m), and
+it does so while being *less accurate* than the model that loses to it.
+
+That is the project's central result: **MAE is the wrong objective, and the
+right one is not the euro figure either** — it is the covariance between
+deviation and price.
+
 Two caveats worth keeping. A zero schedule "saves" €1.35m, so some of every
 figure here is simply being long against BE's small positive day-ahead-to-
 imbalance spread. And the 2h lag is published *exactly* at the deadline: legal,

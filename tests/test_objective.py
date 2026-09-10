@@ -95,3 +95,54 @@ def test_a_single_differing_interval_is_enough_to_keep_it():
     frame = _history(day_ahead=100, long_price=90, short_price=90)
     frame.loc[0, "price_short"] = 500.0
     assert cost_optimal_tau(frame) is not None
+
+
+def test_cost_weights_favour_expensive_intervals():
+    """Weight is proportional to |day-ahead - imbalance|, because an error of a
+    given size costs in proportion to that spread. An unweighted fit spends
+    equal effort on a 200 EUR/MWh hour and a worthless one."""
+    import numpy as np
+    from enerdat.assets.model import cost_weights
+
+    frame = pd.DataFrame({
+        "price_day_ahead": [100.0] * 100,
+        "price_long": [100.0] * 50 + [300.0] * 50,   # second half is expensive
+    })
+    w = cost_weights(frame)
+    assert w is not None
+    assert w[:50].mean() < w[50:].mean(), "cheap intervals must weigh less"
+    # Normalised to mean 1 so the effective learning rate does not move with
+    # the price regime. The floor lifts zero-spread samples off zero, which
+    # nudges the mean slightly above 1 -- deliberate, and small.
+    assert w.mean() == pytest.approx(1.0, abs=0.05)
+
+
+def test_cost_weights_are_winsorised():
+    """Spreads are heavy-tailed; one scarcity hour must not become the fit."""
+    import numpy as np
+    from enerdat.assets.model import cost_weights
+
+    frame = pd.DataFrame({
+        "price_day_ahead": [100.0] * 200,
+        "price_long": [110.0] * 199 + [50_000.0],    # one absurd interval
+    })
+    w = cost_weights(frame)
+    assert w.max() < 50, "a single outlier still dominates the training set"
+
+
+def test_cost_weights_keep_cheap_intervals_contributing():
+    """Zeroing them would discard the shape of the relationship."""
+    from enerdat.assets.model import cost_weights
+
+    frame = pd.DataFrame({
+        "price_day_ahead": [100.0] * 100,
+        "price_long": [100.0] * 50 + [200.0] * 50,   # first half spread zero
+    })
+    w = cost_weights(frame)
+    assert w.min() > 0, "no sample may be discarded entirely"
+
+
+def test_cost_weights_absent_without_prices():
+    from enerdat.assets.model import cost_weights
+
+    assert cost_weights(pd.DataFrame({"price_day_ahead": [1.0]})) is None

@@ -21,6 +21,8 @@ from dagster_duckdb import DuckDBResource
 from enerdat.config import (
     ACTUALS_PUBLICATION_LAG,
     ACTUAL_LAG_HOURS,
+    COST_WEIGHTED_TRAINING,
+    COST_WEIGHT_CLIP_QUANTILE,
     DECISION_LEAD,
     HORIZON,
     MIN_ACTUAL_LAG,
@@ -266,6 +268,38 @@ def cost_optimal_tau(history: pd.DataFrame) -> float | None:
     return float(np.clip(c_long / total, low, high))
 
 
+def cost_weights(history: pd.DataFrame) -> np.ndarray | None:
+    """Per-sample training weight, proportional to |day-ahead - imbalance|.
+
+    An error of a given size costs in proportion to that spread, so an
+    unweighted fit spends equal effort on intervals worth 200 EUR/MWh and on
+    intervals worth nothing. This tilts it toward the ones that matter.
+
+    Winsorised at COST_WEIGHT_CLIP_QUANTILE and normalised to mean 1, so the
+    effective learning rate does not move with the price regime, and no single
+    scarcity hour becomes the entire training set. Returns None when prices are
+    missing, which means "fit unweighted".
+    """
+    needed = {"price_day_ahead", "price_long"}
+    if not COST_WEIGHTED_TRAINING or not needed.issubset(history.columns):
+        return None
+
+    spread = (history["price_day_ahead"] - history["price_long"]).abs()
+    if spread.notna().sum() == 0:
+        return None
+
+    cap = spread.quantile(COST_WEIGHT_CLIP_QUANTILE)
+    weight = spread.clip(upper=cap).fillna(spread.median())
+
+    mean = weight.mean()
+    if not mean or not np.isfinite(mean):
+        return None
+
+    # A floor keeps cheap intervals contributing: they still carry the shape of
+    # the relationship, and zeroing them would throw that away.
+    return np.clip(weight / mean, 0.05, None).to_numpy()
+
+
 def _fit(history: pd.DataFrame, features: list[str], seed: int):
     """Fit the candidate, and report the objective actually used."""
     from sklearn.ensemble import HistGradientBoostingRegressor
@@ -282,7 +316,11 @@ def _fit(history: pd.DataFrame, features: list[str], seed: int):
             max_iter=300, learning_rate=0.06, random_state=seed,
         )
 
-    model.fit(history[features], history["actual_mw"])
+    model.fit(
+        history[features],
+        history["actual_mw"],
+        sample_weight=cost_weights(history),
+    )
     return model, tau
 
 
