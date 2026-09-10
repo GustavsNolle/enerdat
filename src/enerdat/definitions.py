@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from enerdat import checks
 from enerdat.assets import entsoe, marts, model, settlement, weather
-from enerdat.config import DUCKDB_PATH, LAKE_ROOT, OPEN_METEO_MODEL
+from enerdat.config import DUCKDB_PATH, LAKE_ROOT, OPEN_METEO_MODELS
 from enerdat.partitions import daily_partitions
 from enerdat.resources import EntsoeResource, LakeResource, OpenMeteoResource
 
@@ -59,7 +59,7 @@ defs = dg.Definitions(
             api_key=dg.EnvVar("ENTSOE_API_KEY"),
             endpoint_url=os.getenv("ENTSOE_ENDPOINT_URL", ""),
         ),
-        "open_meteo": OpenMeteoResource(model=OPEN_METEO_MODEL),
+        "open_meteo": OpenMeteoResource(models=list(OPEN_METEO_MODELS)),
         "lake": LakeResource(root=LAKE_ROOT),
         "duckdb": DuckDBResource(database=DUCKDB_PATH),
     },

@@ -7,6 +7,7 @@ from dagster import AssetExecutionContext
 from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
+    GRID_POINTS,
     TARGET_TECHNOLOGY,
     WEATHER_LEAD_DAYS,
     WEATHER_VARIABLES,
@@ -14,24 +15,50 @@ from enerdat.config import (
 )
 from enerdat.resources import LakeResource
 
-# Capacity-weighted mean per variable, plus the issue time of the run each
-# feature came from. Written out explicitly rather than with PIVOT: PIVOT has
-# to enumerate its columns at bind time, which DuckDB cannot do in a statement
-# that also carries parameters -- and an explicit list gives a stable schema
-# that does not shift when a variable stops being reported.
-_WEATHER_COLUMNS = ",\n        ".join(
-    f"""sum(CASE WHEN w.variable = '{v}' THEN w.value * w.weight END)
-            / nullif(sum(CASE WHEN w.variable = '{v}' THEN w.weight END), 0)
-                                                             AS {v}_v,
-        max(CASE WHEN w.variable = '{v}' THEN w.issue_time_utc END)
-                                                             AS {v}_issued"""
+# Weather is summarised three ways, because averaging alone destroys the two
+# things that matter most.
+#
+#   {var}_v         capacity-weighted mean across sites, then averaged over
+#                   models -- the central estimate.
+#   {var}_model_sd  disagreement between ICON, GFS and ECMWF at that hour, and
+#                   the uncertainty feature the quantile objective wants: it is
+#                   estimating a distribution, so spread speaks to its width.
+#   ws_site_N       per-site wind speed, averaged over models. The Belgian
+#                   fleet spans ~30 km, so the gradient across it says
+#                   something about a front's timing that one number cannot.
+#   ws_site_sd      spread of wind speed across sites.
+#
+# The two spreads must be computed at different levels of aggregation. Taking a
+# standard deviation over the flat (site x model) rows produces the SAME number
+# for both -- it measures the two sources of variation mixed together and
+# attributes it to whichever column you happened to name. So models are
+# collapsed across sites first and sites across models first, and only then is
+# each spread taken.
+#
+# Written out explicitly rather than with PIVOT, which cannot enumerate its
+# columns in a statement that also carries parameters.
+_PER_MODEL = ",\n            ".join(
+    f"""sum(CASE WHEN variable = '{v}' THEN value * weight END)
+                / nullif(sum(CASE WHEN variable = '{v}' THEN weight END), 0) AS {v}"""
     for v in WEATHER_VARIABLES
 )
 
-# Deduplication is the whole bitemporal story in one clause: the raw layer holds
-# every retrieval of every interval, and the mart takes the most recent one.
-# Swap DESC for a `WHERE retrieved_at_utc <= <as_of>` to reconstruct what was
-# known on any past date.
+_ACROSS_MODELS = ",\n        ".join(
+    f"""avg({v})                                             AS {v}_v,
+        stddev_samp({v})                                     AS {v}_model_sd"""
+    for v in WEATHER_VARIABLES
+)
+
+_ISSUED = ",\n            ".join(
+    f"""max(CASE WHEN variable = '{v}' THEN issue_time_utc END) AS {v}_issued"""
+    for v in WEATHER_VARIABLES
+)
+
+_SITE_PIVOT = ",\n            ".join(
+    f"""avg(CASE WHEN site = '{point['name']}' THEN ws END)   AS ws_site_{i}"""
+    for i, point in enumerate(GRID_POINTS)
+)
+
 _LATEST = (
     "QUALIFY row_number() OVER "
     "(PARTITION BY valid_time_utc ORDER BY retrieved_at_utc DESC) = 1"
@@ -72,12 +99,46 @@ day_ahead AS (
     WHERE variable = 'day_ahead_price'
     {_LATEST}
 ),
+per_model AS (
+    -- One row per (interval, model): the capacity-weighted fleet mean that
+    -- each forecasting centre implies.
+    SELECT
+        valid_time_utc,
+        model,
+        {_PER_MODEL}
+    FROM read_parquet($weather_glob)
+    GROUP BY valid_time_utc, model
+),
 weather AS (
     SELECT
-        w.valid_time_utc,
-        {_WEATHER_COLUMNS}
-    FROM read_parquet($weather_glob) AS w
-    GROUP BY w.valid_time_utc
+        valid_time_utc,
+        {_ACROSS_MODELS}
+    FROM per_model
+    GROUP BY valid_time_utc
+),
+per_site AS (
+    -- One row per (interval, site): wind speed averaged over models.
+    SELECT
+        valid_time_utc,
+        site,
+        avg(CASE WHEN variable = 'wind_speed_100m' THEN value END) AS ws
+    FROM read_parquet($weather_glob)
+    GROUP BY valid_time_utc, site
+),
+sites AS (
+    SELECT
+        valid_time_utc,
+        {_SITE_PIVOT},
+        stddev_samp(ws)                                      AS ws_site_sd
+    FROM per_site
+    GROUP BY valid_time_utc
+),
+issued AS (
+    SELECT
+        valid_time_utc,
+        {_ISSUED}
+    FROM read_parquet($weather_glob)
+    GROUP BY valid_time_utc
 )
 SELECT
     f.valid_time_utc,
@@ -98,13 +159,16 @@ SELECT
     pr.price_long,
     pr.price_short,
     w.* EXCLUDE (valid_time_utc),
+    s.* EXCLUDE (valid_time_utc),
+    i.* EXCLUDE (valid_time_utc),
     $lead_days                                               AS weather_lead_days
 FROM tso_forecast AS f
 LEFT JOIN actual    AS a  USING (valid_time_utc)
 LEFT JOIN prices    AS pr USING (valid_time_utc)
 LEFT JOIN day_ahead AS da USING (valid_time_utc)
-LEFT JOIN weather   AS w
-       ON w.valid_time_utc = date_trunc('hour', f.valid_time_utc)
+LEFT JOIN weather   AS w ON w.valid_time_utc = date_trunc('hour', f.valid_time_utc)
+LEFT JOIN sites     AS s ON s.valid_time_utc = date_trunc('hour', f.valid_time_utc)
+LEFT JOIN issued    AS i ON i.valid_time_utc = date_trunc('hour', f.valid_time_utc)
 ORDER BY f.valid_time_utc
 """
 

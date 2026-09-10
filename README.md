@@ -126,10 +126,33 @@ tests/
   test_model.py        walk-forward causality
 ```
 
+## Features
+
+Roughly 40, all derived from archived forecasts and the clock — never from the
+outturn, never from prices, never from the TSO's own forecast.
+
+| group | what |
+| --- | --- |
+| central estimate | five weather variables, capacity-weighted across the five Belgian farm groups then averaged over models |
+| **model spread** | disagreement between ICON, GFS and ECMWF per variable — the uncertainty signal the quantile objective needs, since it is estimating a distribution |
+| **site structure** | per-site wind speed plus cross-site spread; the fleet spans ~30 km and the gradient across it carries a front's timing |
+| **physics** | turbine power curve — zero below cut-in, cubic to rated, flat to cut-out, zero beyond. That last step is why raw wind speed is not enough: in a storm the fleet shuts down, so 30 m/s and a dead calm look identical from the grid's side |
+| **shape** | ±1 and ±3 intervals, a centred 3-interval mean, and a first difference, on wind speed and power fraction. Forecast error concentrates on ramps and a model shown one instant cannot see one |
+| calendar | hour-of-day on a circle, month |
+
+The two spreads are computed at *different levels of aggregation*. A standard
+deviation over the flat (site × model) rows gives the same number for both and
+silently attributes mixed variance to whichever column is named — measured
+1.02 m/s across models against 0.42 m/s across sites once separated.
+
+Feature selection is an **allow-list**. Prices and the TSO forecast both sit in
+the mart and neither is knowable at gate closure, so a subtractive rule would be
+one careless column away from a leak.
+
 ## The candidate model
 
-The modelling is deliberately unremarkable — gradient boosting on hub-height
-wind speed. What matters is *when* the model is allowed to learn things.
+Gradient boosting (`HistGradientBoostingRegressor`, 300 iterations). What
+matters is *when* the model is allowed to learn things.
 
 A single fit scored on a random split would leak: predicting January with a
 model that saw July is not a forecast. So `walk_forward_predict` walks forward.

@@ -96,12 +96,16 @@ MODEL_RETRAIN_DAYS = 30
 # Below this much training history the model abstains and emits NULL rather
 # than a prediction nobody should trust.
 #
+# Ninety days rather than the original twenty-one: at BE's hourly resolution
+# three weeks is only about 500 rows to learn a seasonal, nonlinear response
+# from, and the feature set is now far wider than it was.
+#
 # Counted in DAYS, not intervals, because market resolution is not a constant:
 # BE publishes the day-ahead forecast hourly (24 intervals/day) while NL
 # publishes quarter-hourly (96). An interval threshold silently means four
 # times as much history in one zone as the other -- and at 2000 intervals it
 # meant BE could never train at all.
-MIN_TRAIN_DAYS = 21
+MIN_TRAIN_DAYS = 90
 
 # Whether the TSO's own day-ahead forecast may be used as a model feature.
 #
@@ -144,6 +148,21 @@ MODEL_OBJECTIVE = "euros"
 # degenerate quantile; clamping keeps the schedule sane.
 TAU_BOUNDS = (0.05, 0.95)
 
+# Turbine response, used to hand the model physics rather than make it
+# rediscover a sigmoid from a few months of history. Power rises with the cube
+# of wind speed between cut-in and rated, is flat to cut-out, and is zero
+# beyond it -- a storm shutdown looks identical to a calm from the grid's side,
+# which no monotonic function of wind speed can express.
+TURBINE_CUT_IN_MS = 3.0
+TURBINE_RATED_MS = 12.5
+TURBINE_CUT_OUT_MS = 25.0
+
+# Offsets, in intervals, used to give the model the shape of the weather around
+# each hour rather than a single instant. Negative is earlier, positive later:
+# both are legal, because these are forecast values that were all on the table
+# at gate closure. Lagging the *target* would not be, and is not done.
+WEATHER_LAG_STEPS = (-3, -1, 1, 3)
+
 # --- weather sampling --------------------------------------------------------
 
 # The Belgian offshore wind zone, grouped into five sampling points. Weights
@@ -172,7 +191,19 @@ WEATHER_VARIABLES = [
     "surface_pressure",
 ]
 
-OPEN_METEO_MODEL = "icon_seamless"
+# Three independent forecasting centres rather than one. Their disagreement at
+# a given hour is the uncertainty signal: when ICON, GFS and ECMWF part company
+# the outturn is genuinely less predictable, and the quantile objective needs
+# exactly that -- it is estimating a distribution, not a point.
+#
+# Open-Meteo's ensemble API would give members of a single model; cross-model
+# spread captures structural disagreement instead, and comes from the same
+# archived-forecast endpoint that already guarantees a fixed lead time.
+OPEN_METEO_MODELS = (
+    "icon_seamless",
+    "gfs_seamless",
+    "ecmwf_ifs025",
+)
 
 # --- storage -----------------------------------------------------------------
 

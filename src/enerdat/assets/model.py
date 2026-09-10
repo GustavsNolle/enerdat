@@ -20,23 +20,106 @@ from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
     ACTUALS_PUBLICATION_LAG,
+    GRID_POINTS,
     MIN_TRAIN_DAYS,
     MODEL_OBJECTIVE,
     MODEL_RETRAIN_DAYS,
     TARGET_TECHNOLOGY,
     TAU_BOUNDS,
+    TURBINE_CUT_IN_MS,
+    TURBINE_CUT_OUT_MS,
+    TURBINE_RATED_MS,
+    WEATHER_LAG_STEPS,
     USE_TSO_FORECAST_AS_FEATURE,
     WEATHER_VARIABLES,
     ZONE,
 )
 
 
+LAGGED = ("wind_speed_100m_v", "power_fraction")
+
+
+def power_fraction(speed_ms):
+    """Turbine power curve, normalised to 1 at rated output.
+
+    Zero below cut-in, cubic to rated, flat to cut-out, and zero again beyond
+    it. That last step is why this cannot be replaced by any monotonic function
+    of wind speed: in a storm the fleet shuts down, so a 30 m/s hour and a dead
+    calm look identical from the grid's side.
+    """
+    speed = np.asarray(speed_ms, dtype="float64")
+    out = np.zeros_like(speed)
+
+    ramp = (speed >= TURBINE_CUT_IN_MS) & (speed < TURBINE_RATED_MS)
+    out[ramp] = (speed[ramp] ** 3 - TURBINE_CUT_IN_MS**3) / (
+        TURBINE_RATED_MS**3 - TURBINE_CUT_IN_MS**3
+    )
+    out[(speed >= TURBINE_RATED_MS) & (speed < TURBINE_CUT_OUT_MS)] = 1.0
+
+    out[~np.isfinite(speed)] = np.nan
+    return out
+
+
+def add_physics_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Hand the model the turbine response instead of making it be inferred."""
+    out = frame.copy()
+    if "wind_speed_100m_v" in out.columns:
+        out["power_fraction"] = power_fraction(out["wind_speed_100m_v"])
+        for i in range(len(GRID_POINTS)):
+            column = f"ws_site_{i}"
+            if column in out.columns:
+                out[f"pf_site_{i}"] = power_fraction(out[column])
+    return out
+
+
+def add_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Neighbouring hours, a local average, and a rate of change.
+
+    Forecast error concentrates on ramps, and a model shown one instant at a
+    time cannot see one. Both directions are used: these are *forecast* values,
+    all of which were on the table at gate closure, so a later hour is no more
+    privileged than an earlier one. Lagging the target would be another matter
+    entirely and is not done.
+    """
+    out = frame.sort_values("valid_time_utc").copy()
+    for column in LAGGED:
+        if column not in out.columns:
+            continue
+        for step in WEATHER_LAG_STEPS:
+            out[f"{column}_t{step:+d}"] = out[column].shift(-step)
+        out[f"{column}_roll3"] = (
+            out[column].rolling(3, center=True, min_periods=1).mean()
+        )
+        out[f"{column}_delta"] = out[column].diff()
+    return out
+
+
 def feature_columns(available: list[str]) -> list[str]:
-    """Weather features present in the mart, plus calendar terms."""
-    weather = [f"{v}_v" for v in WEATHER_VARIABLES if f"{v}_v" in available]
-    calendar = [c for c in ("hour_sin", "hour_cos", "month") if c in available]
-    extra = ["tso_forecast_mw"] if USE_TSO_FORECAST_AS_FEATURE else []
-    return weather + calendar + extra
+    """Everything the model is allowed to see, named explicitly.
+
+    An allow-list rather than "all columns except the target": prices and the
+    TSO forecast both sit in the mart and neither is knowable at gate closure,
+    so a subtractive rule would be one careless column away from a leak.
+    """
+    columns = []
+
+    for variable in WEATHER_VARIABLES:
+        columns += [f"{variable}_v", f"{variable}_model_sd"]
+
+    columns += [f"ws_site_{i}" for i in range(len(GRID_POINTS))]
+    columns += [f"pf_site_{i}" for i in range(len(GRID_POINTS))]
+    columns += ["ws_site_sd", "power_fraction"]
+
+    for base in LAGGED:
+        columns += [f"{base}_t{step:+d}" for step in WEATHER_LAG_STEPS]
+        columns += [f"{base}_roll3", f"{base}_delta"]
+
+    columns += ["hour_sin", "hour_cos", "month"]
+
+    if USE_TSO_FORECAST_AS_FEATURE:
+        columns.append("tso_forecast_mw")
+
+    return [c for c in columns if c in available]
 
 
 def add_calendar_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -209,6 +292,8 @@ def candidate_forecast(
         raise dg.Failure(description="forecast_error is empty; build the mart first.")
 
     frame = add_calendar_features(frame)
+    frame = add_physics_features(frame)
+    frame = add_lag_features(frame)
     features = feature_columns(list(frame.columns))
     if not features:
         raise dg.Failure(description="No usable feature columns in forecast_error.")
@@ -220,10 +305,8 @@ def candidate_forecast(
     mae_candidate = float((scored.candidate_mw - scored.actual_mw).abs().mean()) if len(scored) else float("nan")
     mae_tso = float((scored.tso_forecast_mw - scored.actual_mw).abs().mean()) if len(scored) else float("nan")
 
-    keep = [
-        c for c in frame.columns
-        if not c.endswith("_issued") and c not in ("hour_sin", "hour_cos", "month")
-    ]
+    derived = set(features) | {"hour_sin", "hour_cos", "month"}
+    keep = [c for c in frame.columns if not c.endswith("_issued") and c not in derived]
     with duckdb.get_connection() as connection:
         connection.register("candidate_df", frame[keep])
         connection.execute(

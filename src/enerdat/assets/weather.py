@@ -7,7 +7,7 @@ from dagster import AssetExecutionContext
 from enerdat.config import (
     GRID_POINTS,
     MARKET_TZ,
-    OPEN_METEO_MODEL,
+    OPEN_METEO_MODELS,
     WEATHER_LEAD_DAYS_OPTIONS,
     WEATHER_VARIABLES,
 )
@@ -76,7 +76,6 @@ def openmeteo_archived_forecast(
     combined["issue_time_utc"] = combined["valid_time_utc"] - pd.to_timedelta(
         combined["lead_days"], unit="D"
     )
-    combined["model"] = OPEN_METEO_MODEL
     combined["retrieved_at_utc"] = retrieved_at
 
     # Gate closure is per delivery day, so the legality of a given lead varies
@@ -93,7 +92,9 @@ def openmeteo_archived_forecast(
 
     fresh = (
         legal.sort_values("lead_days")
-        .drop_duplicates(subset=["site", "variable", "valid_time_utc"], keep="first")
+        .drop_duplicates(
+            subset=["site", "model", "variable", "valid_time_utc"], keep="first"
+        )
         .sort_values(["valid_time_utc", "site", "variable"])
     )
 
@@ -124,6 +125,7 @@ def openmeteo_archived_forecast(
         metadata={
             "rows": len(combined),
             "sites": len(GRID_POINTS),
+            "models": dg.MetadataValue.json(list(OPEN_METEO_MODELS)),
             "requests": len(GRID_POINTS),
             "partitions_requested": len(keys),
             "partitions_written": written,

@@ -43,6 +43,36 @@ def _write_entsoe(lake, dataset, values, retrieved_at):
     lake.write(dataset, DELIVERY_DATE, frame, retrieved_at)
 
 
+def _write_weather_models(lake, retrieved_at, per_model_site_speeds):
+    """Weather for several models at several sites, with controlled values.
+
+    `per_model_site_speeds` maps model -> {site: wind speed}, so a test can
+    dictate exactly how much models disagree and how much sites disagree.
+    """
+    start, end = delivery_window(DELIVERY_DATE)
+    hours = pd.date_range(
+        start.tz_convert("UTC"), end.tz_convert("UTC"), freq="1h", inclusive="left"
+    )
+    weights = dict(SITES)
+    rows = []
+    for model, site_speeds in per_model_site_speeds.items():
+        for site, speed in site_speeds.items():
+            for hour in hours:
+                rows.append({
+                    "valid_time_utc": hour,
+                    "variable": "wind_speed_100m",
+                    "value": float(speed),
+                    "lead_days": 2,
+                    "site": site,
+                    "weight": weights[site],
+                    "model": model,
+                    "issue_time_utc": hour - pd.Timedelta(days=2),
+                    "delivery_date": DELIVERY_DATE,
+                    "retrieved_at_utc": retrieved_at,
+                })
+    lake.write("openmeteo_archived_forecast", DELIVERY_DATE, pd.DataFrame(rows), retrieved_at)
+
+
 def _write_weather(lake, issue_offset_days, retrieved_at):
     start, end = delivery_window(DELIVERY_DATE)
     hours = pd.date_range(
@@ -230,3 +260,44 @@ def test_scope_check_catches_the_nl_style_mismatch(tmp_path):
     evaluation = next(iter(result.get_asset_check_evaluations()))
     assert not evaluation.passed
     assert "ratio" in str(evaluation.metadata).lower()
+
+
+def test_model_spread_and_site_spread_are_measured_separately(tmp_path):
+    """They are different quantities and must not collapse to one number.
+
+    A standard deviation taken over the flat (site x model) rows returns the
+    SAME value for both, mixing the two sources of variation and attributing it
+    to whichever column happens to be named. Here the models are made to
+    disagree a lot and the sites barely at all, so a shared implementation
+    cannot pass.
+    """
+    lake = LakeResource(root=str(tmp_path / "raw"))
+    duckdb = DuckDBResource(database=str(tmp_path / "spread.duckdb"))
+    t0 = pd.Timestamp("2026-08-29T06:00:00Z")
+
+    shape = lambda i: 100.0 + np.sin(np.arange(len(i)) / 6) * 40
+    _write_entsoe(lake, "entsoe_day_ahead_forecast", shape, t0)
+    _write_entsoe(lake, "entsoe_actual_generation", shape, t0)
+    _write_prices(lake, t0)
+
+    # Models 5 m/s apart; sites 0.2 m/s apart.
+    _write_weather_models(lake, t0, {
+        "alpha": {"Borssele": 5.0, "Gemini": 5.2},
+        "beta":  {"Borssele": 15.0, "Gemini": 15.2},
+    })
+
+    resources = {"lake": lake, "duckdb": duckdb}
+    assert dg.materialize([forecast_error_mart], resources=resources).success
+
+    with duckdb.get_connection() as conn:
+        model_sd, site_sd = conn.execute(
+            """SELECT DISTINCT round(wind_speed_100m_model_sd, 3),
+                               round(ws_site_sd, 3)
+               FROM forecast_error WHERE wind_speed_100m_model_sd IS NOT NULL"""
+        ).fetchone()
+
+    # Two models at ~5.1 and ~15.1 -> sample sd of about 7.07
+    assert model_sd == pytest.approx(7.07, abs=0.05)
+    # Two sites, each averaged across models -> 10.0 and 10.2 -> sd about 0.14
+    assert site_sd == pytest.approx(0.141, abs=0.02)
+    assert model_sd > site_sd * 10, "the two spreads collapsed into one number"

@@ -147,7 +147,7 @@ class OpenMeteoResource(dg.ConfigurableResource):
     """
 
     base_url: str = "https://historical-forecast-api.open-meteo.com/v1/forecast"
-    model: str = "icon_seamless"
+    models: list[str] = ["icon_seamless"]  # noqa: RUF012 - dagster config
     timeout_seconds: int = 60
     max_attempts: int = 4
     backoff_seconds: float = 2.0
@@ -179,7 +179,7 @@ class OpenMeteoResource(dg.ConfigurableResource):
             "start_date": start_date,
             "end_date": end_date,
             "hourly": ",".join(suffixed),
-            "models": self.model,
+            "models": ",".join(self.models),
             "timezone": "UTC",
             "windspeed_unit": "ms",
         }
@@ -207,21 +207,37 @@ class OpenMeteoResource(dg.ConfigurableResource):
         frame = pd.DataFrame(hourly)
         frame["time"] = pd.to_datetime(frame["time"], utc=True)
 
-        # One tidy block per lead, so the lead is a column rather than part of
-        # the variable name and downstream schemas stay stable.
+        # One tidy block per (lead, model), so both become columns rather than
+        # parts of a variable name and downstream schemas stay stable.
+        #
+        # Open-Meteo suffixes the model only when more than one is requested,
+        # so both spellings are accepted.
         blocks = []
         for lead in leads:
-            columns = {f"{v}_previous_day{lead}": v for v in variables}
-            present = {k: v for k, v in columns.items() if k in frame.columns}
-            if not present:
-                continue
-            block = frame[["time", *present]].rename(columns=present)
-            block = block.melt(
-                id_vars="time", var_name="variable", value_name="value"
-            ).rename(columns={"time": "valid_time_utc"})
-            block["lead_days"] = lead
-            blocks.append(block)
+            for model in self.models:
+                columns = {}
+                for variable in variables:
+                    suffixed = f"{variable}_previous_day{lead}_{model}"
+                    bare = f"{variable}_previous_day{lead}"
+                    if suffixed in frame.columns:
+                        columns[suffixed] = variable
+                    elif len(self.models) == 1 and bare in frame.columns:
+                        columns[bare] = variable
+                if not columns:
+                    continue
+                block = frame[["time", *columns]].rename(columns=columns)
+                block = block.melt(
+                    id_vars="time", var_name="variable", value_name="value"
+                ).rename(columns={"time": "valid_time_utc"})
+                block["lead_days"] = lead
+                block["model"] = model
+                blocks.append(block)
 
+        if not blocks:
+            raise RuntimeError(
+                "Open-Meteo returned no recognisable columns for "
+                f"leads={leads} models={self.models}"
+            )
         return pd.concat(blocks, ignore_index=True)
 
 
