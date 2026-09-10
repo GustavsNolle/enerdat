@@ -120,7 +120,7 @@ def _write_prices(lake, retrieved_at):
 
 
 def _build(tmp_path, issue_offset_days):
-    lake = LakeResource(root=str(tmp_path / "raw"))
+    lake = LakeResource(root=str(tmp_path / "raw"), zone="BE")
     duckdb = DuckDBResource(database=str(tmp_path / "test.duckdb"))
     t0 = pd.Timestamp("2026-08-29T06:00:00Z")
 
@@ -212,7 +212,7 @@ def test_leakage_check_catches_a_leak(tmp_path):
 
 def _build_with_scale(tmp_path, actual_scale):
     """forecast_error where actual is a fixed multiple of the forecast."""
-    lake = LakeResource(root=str(tmp_path / "raw"))
+    lake = LakeResource(root=str(tmp_path / "raw"), zone="BE")
     duckdb = DuckDBResource(database=str(tmp_path / "scale.duckdb"))
     t0 = pd.Timestamp("2026-08-29T06:00:00Z")
 
@@ -271,7 +271,7 @@ def test_model_spread_and_site_spread_are_measured_separately(tmp_path):
     disagree a lot and the sites barely at all, so a shared implementation
     cannot pass.
     """
-    lake = LakeResource(root=str(tmp_path / "raw"))
+    lake = LakeResource(root=str(tmp_path / "raw"), zone="BE")
     duckdb = DuckDBResource(database=str(tmp_path / "spread.duckdb"))
     t0 = pd.Timestamp("2026-08-29T06:00:00Z")
 

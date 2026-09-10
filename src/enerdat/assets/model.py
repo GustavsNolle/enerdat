@@ -180,6 +180,25 @@ def cost_optimal_tau(history: pd.DataFrame) -> float | None:
     if priced.empty:
         return None
 
+    # The quantile framework needs DUAL pricing. Its whole basis is that cost
+    # is piecewise-linear in the schedule, with a kink at the outturn because
+    # the two directions settle at different prices -- that kink is what makes
+    # an interior optimum exist and puts it at a quantile.
+    #
+    # Under a SINGLE imbalance price the two arms share a slope, cost becomes
+    # linear in the schedule, and the optimum runs off to an extreme: schedule
+    # zero if the imbalance price sits above day-ahead on average, unbounded if
+    # below. A model handed that objective does not find an edge, it finds the
+    # degeneracy, and reports enormous fictional savings from systematically
+    # under-nominating.
+    #
+    # Most of Europe has harmonised on single pricing, so this is the common
+    # case rather than a data error -- and ENTSO-E still labels the columns
+    # Long and Short, which makes it easy to miss. Fall back to the megawatt
+    # objective and let the caller report why.
+    if priced["price_long"].equals(priced["price_short"]):
+        return None
+
     c_long = (priced["price_day_ahead"] - priced["price_long"]).clip(lower=0).mean()
     c_short = (priced["price_short"] - priced["price_day_ahead"]).clip(lower=0).mean()
 

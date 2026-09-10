@@ -14,28 +14,28 @@ import datetime as dt
 
 # Bidding zone, as an entsoe-py alias.
 #
-# BE, chosen on evidence rather than preference. Two things have to hold at
-# once, and few zones manage both:
+# PL, chosen on measured price asymmetry after BE turned out to have none.
+# Three conditions have to hold at once and PL is the only zone scanned that
+# meets all three (see scripts/market_scan.py):
 #
-#   1. The zone must publish an imbalance price at bidding-zone level, since
-#      that is what converts MWh of error into euros. DE_LU does not.
-#   2. The 14.1.D forecast and the 16.1 metered actual must describe the same
-#      fleet. Measured over 1-7 Sep 2026, mean actual / mean forecast:
+#   1. Publishes an imbalance price at bidding-zone level. DE_LU does not.
+#   2. Its 14.1.D forecast and 16.1 metered actual describe the same fleet.
+#      Measured over a full year: Solar ratio 0.945 at 0.989 correlation,
+#      Wind Onshore 0.923 at 0.946. NL fails this catastrophically.
+#   3. Imbalance pricing is ASYMMETRIC, which is what the euro objective
+#      exploits. Full year: c_long 54.38, c_short 397.35, tau 0.120, 7.31x --
+#      and all thirteen months sit below tau 0.34, so it is structural rather
+#      than seasonal. Being short costs 328-523 EUR/MWh in every month.
 #
-#          zone   solar   offshore   onshore
-#          BE      1.05      1.00      0.95     <- consistent
-#          DE_LU   1.04      0.90      1.00     (but no imbalance price)
-#          DK_1    1.11      1.20      1.19     (systematic +19% bias)
-#          NL      0.04      2.83      0.25     <- unusable
-#
-#      NL fails badly: Dutch distributed generation never reaches TenneT's
-#      metered aggregate, so subtracting forecast from actual measures scope,
-#      not error. `checks.forecast_actual_comparable` now fails the mart on
-#      exactly this, so the trap cannot be re-entered silently.
-ZONE = "BE"
+# BE met the first two and failed the third at tau 0.462, which is why the euro
+# objective was worth 0.2% there. Its result is kept in results/.
+ZONE = "PL"
 
 # The series we are trying to predict, as ENTSO-E names it.
-TARGET_TECHNOLOGY = "Wind Offshore"
+# Poland's offshore fleet is only now commissioning -- 89 MW mean, and it fails
+# the scope check at 0.735 ratio. Onshore is the real fleet at 2625 MW mean,
+# roughly five times the scale of BE offshore.
+TARGET_TECHNOLOGY = "Wind Onshore"
 
 # ENTSO-E market time. Note this is a *market* convention, not a display
 # preference: delivery days are defined in it, so DST days have 23 or 25 hours.
@@ -223,19 +223,25 @@ WEATHER_LAG_STEPS = (-3, -1, 1, 3)
 
 # --- weather sampling --------------------------------------------------------
 
-# The Belgian offshore wind zone, grouped into five sampling points. Weights
-# are installed MW summed from query_installed_generation_capacity_per_unit,
-# which lists ten BE offshore units totalling 2260.8 MW.
+# Polish onshore wind, sampled by voivodeship centroid and weighted by
+# installed MW. Weights are approximate regional shares of a fleet around
+# 9-10 GW and should be refined against
+# query_installed_generation_capacity_per_unit.
 #
-# The whole fleet sits inside roughly 30 km of North Sea, so these points are
-# highly correlated -- that is a fact about Belgian offshore wind, not a
-# sampling flaw, and it is exactly why the zone's output swings as one block.
+# This is a very different spatial problem from Belgium. The Belgian fleet sat
+# inside 30 km of North Sea and moved as one block; Poland's spans roughly 600
+# km from the Baltic coast to Silesia, so a front crosses it over hours rather
+# than minutes. The per-site columns and cross-site spread should carry far
+# more signal here than they did in BE, where they were near-duplicates.
 GRID_POINTS = [
-    {"name": "Norther",              "lat": 51.53, "lon": 3.00, "weight": 370.0},
-    {"name": "Thorntonbank C-Power", "lat": 51.55, "lon": 2.93, "weight": 325.2},
-    {"name": "Rentel + Northwind",   "lat": 51.60, "lon": 2.92, "weight": 523.0},
-    {"name": "Seastar + Mermaid",    "lat": 51.65, "lon": 2.85, "weight": 487.5},
-    {"name": "Belwind + NW2",        "lat": 51.67, "lon": 2.80, "weight": 555.1},
+    {"name": "Zachodniopomorskie", "lat": 53.50, "lon": 15.50, "weight": 1900.0},
+    {"name": "Pomorskie",          "lat": 54.20, "lon": 18.00, "weight": 1300.0},
+    {"name": "Kujawsko-Pomorskie", "lat": 53.00, "lon": 18.50, "weight": 1300.0},
+    {"name": "Wielkopolskie",      "lat": 52.40, "lon": 17.00, "weight": 1400.0},
+    {"name": "Lodzkie",            "lat": 51.70, "lon": 19.30, "weight": 1000.0},
+    {"name": "Warminsko-Mazurskie","lat": 53.80, "lon": 20.50, "weight": 600.0},
+    {"name": "Podlaskie",          "lat": 53.10, "lon": 23.00, "weight": 400.0},
+    {"name": "Dolnoslaskie",       "lat": 51.00, "lon": 17.00, "weight": 500.0},
 ]
 
 # Hourly variables pulled at each grid point. Wind power tracks the cube of

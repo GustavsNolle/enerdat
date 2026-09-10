@@ -15,7 +15,7 @@ T0 = pd.Timestamp("2026-08-29T06:00:00Z")
 def _setup(tmp_path, actual, scheduled, price_long, price_short, n=4,
            candidate=None, day_ahead=0.0):
     """Build a tiny candidate_forecast table plus matching prices."""
-    lake = LakeResource(root=str(tmp_path / "raw"))
+    lake = LakeResource(root=str(tmp_path / "raw"), zone="BE")
     duckdb = DuckDBResource(database=str(tmp_path / "s.duckdb"))
     index = pd.date_range("2026-08-28T00:00:00Z", periods=n, freq="15min")
 

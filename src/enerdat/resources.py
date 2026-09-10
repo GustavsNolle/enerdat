@@ -252,8 +252,20 @@ class LakeResource(dg.ConfigurableResource):
 
     root: str
 
+    # The lake is partitioned by zone as well as by day. Without this,
+    # re-pointing the pipeline at another bidding zone drops its rows into the
+    # same directories as the previous one, and the mart -- which does not
+    # filter on the zone column -- would silently average two countries
+    # together. Keeping them apart also makes zones comparable later.
+    zone: str
+
     def partition_dir(self, dataset: str, partition_key: str) -> Path:
-        return Path(self.root) / dataset / f"delivery_date={partition_key}"
+        return (
+            Path(self.root)
+            / dataset
+            / f"zone={self.zone}"
+            / f"delivery_date={partition_key}"
+        )
 
     def write(
         self,
@@ -270,4 +282,4 @@ class LakeResource(dg.ConfigurableResource):
         return path
 
     def glob(self, dataset: str) -> str:
-        return str(Path(self.root) / dataset / "**" / "*.parquet")
+        return str(Path(self.root) / dataset / f"zone={self.zone}" / "**" / "*.parquet")

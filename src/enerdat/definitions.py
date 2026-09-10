@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from enerdat import checks
 from enerdat.assets import entsoe, marts, model, settlement, weather
-from enerdat.config import DUCKDB_PATH, LAKE_ROOT, OPEN_METEO_MODELS
+from enerdat.config import DUCKDB_PATH, LAKE_ROOT, OPEN_METEO_MODELS, ZONE
 from enerdat.partitions import daily_partitions
 from enerdat.resources import EntsoeResource, LakeResource, OpenMeteoResource
 
@@ -42,6 +42,8 @@ defs = dg.Definitions(
         checks.market_day_length,
         checks.unique_intervals,
         checks.forecast_actual_comparable,
+        checks.imbalance_pricing_is_dual,
+        checks.cost_measure_is_well_posed,
     ],
     jobs=[backfill_raw, build_mart],
     schedules=[
@@ -60,7 +62,7 @@ defs = dg.Definitions(
             endpoint_url=os.getenv("ENTSOE_ENDPOINT_URL", ""),
         ),
         "open_meteo": OpenMeteoResource(models=list(OPEN_METEO_MODELS)),
-        "lake": LakeResource(root=LAKE_ROOT),
+        "lake": LakeResource(root=LAKE_ROOT, zone=ZONE),
         "duckdb": DuckDBResource(database=DUCKDB_PATH),
     },
 )

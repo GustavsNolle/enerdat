@@ -253,6 +253,42 @@ candidate does shift long (45.5% of intervals against the TSO's 37.1%) and its
 signed bias falls from −37.6 MW to −6.6 MW — there is simply no asymmetry to
 exploit. The MAE gain that *did* appear is L1 versus L2, not the thesis.
 
+### Poland: a cautionary result, kept because it is instructive
+
+Re-pointing to PL produced **€357m of "savings" and a candidate beating the TSO
+on MAE**. Both were artefacts. The check that caught it is one line of
+arithmetic:
+
+| schedule | MAE MW | bias MW | cost €m | saved vs TSO |
+| --- | --- | --- | --- | --- |
+| TSO forecast | 397.0 | −207.6 | 198.0 | 0.0 |
+| TSO + causal bias shift | 409.5 | −4.8 | −236.6 | 434.6 |
+| model | 375.3 | +27.0 | −159.0 | 357.0 |
+| **perfect foresight** | 0.0 | 0.0 | **0.0** | **198.0** |
+| schedule of zero | — | — | −4,887 | **5,085** |
+
+**Two schedules beat perfect foresight, and bidding zero beat everything.** You
+cannot out-earn knowing the future, so the measure was broken, not the market.
+
+The cause: `price_long` and `price_short` are **identical in every zone** —
+entsoe-py labels the columns that way regardless of regime, and most of Europe
+has harmonised on *single* imbalance pricing. Under one price the two arms of
+the cost function share a slope, so cost is linear in the schedule; with the
+imbalance price above day-ahead 88.4% of the time in PL, cost falls without
+bound as the schedule falls. Not an edge — in a real market you cannot
+systematically under-nominate, because your own volume moves the price and
+sustained imbalance is penalised.
+
+BE survives the same test (zero-schedule cost +€16.6m, TSO +€26.5m) because its
+mean day-ahead-to-imbalance spread is near zero, so the linear term vanishes and
+cost is driven by the correlation between deviation and price — a real signal.
+That is why the BE figures stand and the PL ones do not.
+
+`cost_measure_is_well_posed` is now a blocking check on the settlement mart,
+and `imbalance_pricing_is_dual` reports the regime. The τ scan below measures
+how often the single price sits above day-ahead — a real quantity, but **not**
+the dual-price asymmetry it was originally read as.
+
 ### Which market, and why BE was the wrong one
 
 `scripts/market_scan.py` answers this in one query per zone, and should be run

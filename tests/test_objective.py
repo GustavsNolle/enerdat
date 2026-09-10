@@ -67,3 +67,31 @@ def test_missing_prices_fall_back_rather_than_guess():
     frame = _history(day_ahead=100, long_price=90, short_price=140)
     assert cost_optimal_tau(frame.drop(columns=["price_day_ahead"])) is None
     assert cost_optimal_tau(frame.assign(price_long=np.nan)) is None
+
+
+def test_single_pricing_disarms_the_quantile_objective():
+    """The degeneracy that produced a fictional billion euros.
+
+    Under one imbalance price both directions share a slope, so settlement cost
+    is linear in the schedule and its optimum is not interior -- it runs to
+    zero or to infinity. A model given that objective under-nominates its way
+    to an imaginary profit. Detect it and fall back rather than "optimise" it.
+
+    ENTSO-E labels the columns Long and Short regardless of regime, so this is
+    invisible until the values are compared, and most of Europe is single
+    priced.
+    """
+    frame = _history(day_ahead=100, long_price=250, short_price=250)
+    assert cost_optimal_tau(frame) is None
+
+
+def test_dual_pricing_still_yields_a_quantile():
+    frame = _history(day_ahead=100, long_price=90, short_price=140)
+    assert cost_optimal_tau(frame) == pytest.approx(0.2)
+
+
+def test_a_single_differing_interval_is_enough_to_keep_it():
+    """Near-identical is not identical; only exact equality disarms it."""
+    frame = _history(day_ahead=100, long_price=90, short_price=90)
+    frame.loc[0, "price_short"] = 500.0
+    assert cost_optimal_tau(frame) is not None
