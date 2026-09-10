@@ -68,7 +68,8 @@ def test_model_abstains_until_history_is_long_enough():
     frame = add_calendar_features(_history(days=20))
     features = feature_columns(list(frame.columns))
     predictions, audit = walk_forward_predict(
-        frame, features, retrain_days=7, min_train_days=10_000, lag=LAG
+        frame, features, retrain_days=7, min_train_days=10_000,
+        train_window_days=None, lag=LAG,
     )
     assert predictions.isna().all(), "abstention must mean NULL, not a guess"
     assert not audit["predicted"].any()
@@ -107,3 +108,53 @@ def test_tso_forecast_is_not_a_feature_by_default():
     """Article 14.1.D lands at 18:00 D-1, after the 12:00 gate closure."""
     frame = add_calendar_features(_history(days=5))
     assert "tso_forecast_mw" not in feature_columns(list(frame.columns))
+
+
+def test_training_window_actually_bounds_the_history():
+    """A rolling window must forget old intervals, not just gate the start.
+
+    MIN_TRAIN_DAYS alone cannot do this: it decides when prediction begins and
+    leaves training expanding, so two different values produce byte-identical
+    predictions on any day both can reach.
+    """
+    frame = add_calendar_features(_history(days=200))
+    features = feature_columns(list(frame.columns))
+
+    _, wide = walk_forward_predict(
+        frame, features, retrain_days=30, min_train_days=30,
+        train_window_days=180, lag=LAG,
+    )
+    _, narrow = walk_forward_predict(
+        frame, features, retrain_days=30, min_train_days=30,
+        train_window_days=45, lag=LAG,
+    )
+
+    wide_rows = wide[wide["predicted"]]["n_train"].max()
+    narrow_rows = narrow[narrow["predicted"]]["n_train"].max()
+    assert narrow_rows < wide_rows, "the narrow window did not bound anything"
+    assert narrow_rows <= 45 * 96 + 96, "narrow window kept more than 45 days"
+
+
+def test_expanding_window_keeps_growing():
+    frame = add_calendar_features(_history(days=200))
+    features = feature_columns(list(frame.columns))
+    _, audit = walk_forward_predict(
+        frame, features, retrain_days=30, min_train_days=30,
+        train_window_days=None, lag=LAG,
+    )
+    trained = audit[audit["predicted"]]["n_train"]
+    assert trained.iloc[-1] > trained.iloc[0], "expanding history must grow"
+
+
+def test_a_window_shorter_than_the_gate_is_rejected():
+    """Otherwise the model silently predicts nothing at all.
+
+    The windowed history can never reach the gate, so every day abstains and
+    the run looks successful while producing no forecast.
+    """
+    frame = add_calendar_features(_history(days=30))
+    features = feature_columns(list(frame.columns))
+    with pytest.raises(ValueError, match="shorter than"):
+        walk_forward_predict(
+            frame, features, min_train_days=90, train_window_days=60, lag=LAG
+        )

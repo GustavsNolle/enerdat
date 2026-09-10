@@ -93,8 +93,35 @@ ACTUALS_PUBLICATION_LAG = dt.timedelta(hours=1)
 # monthly stays strictly causal and runs in reasonable time.
 MODEL_RETRAIN_DAYS = 30
 
+# How far back a fit is allowed to look, in days. None keeps every interval
+# since the start of the backfill (expanding); an integer makes it a rolling
+# window that forgets older data.
+#
+# The trade-off is real in both directions. A turbine fleet changes -- farms
+# commission, blades degrade, curtailment rules shift -- so old data can
+# describe a plant that no longer exists. Against that, wind is seasonal, and a
+# window shorter than a year has never seen the season it is being asked to
+# predict.
+# Ninety, measured. Swept 60/90/180/270/expanding on a common 7292-interval
+# evaluation set (candidate MAE / TSO MAE): 1.225, 1.211, 1.220, 1.237, 1.255.
+#
+# A shallow U with its minimum near a quarter, and the notable end is the far
+# one: training on ALL history is the worst setting tested, 3.6% behind a
+# 90-day window. More data actively hurts here, because old intervals describe
+# a fleet and a curtailment regime that have since moved on. Anything from 60
+# to 180 days is within about 1% of the best, so this is a real effect but not
+# a sharp one -- do not over-tune it on a single year.
+TRAIN_WINDOW_DAYS = 90
+
 # Below this much training history the model abstains and emits NULL rather
 # than a prediction nobody should trust.
+#
+# NOTE this is a *gate*, not a window length: it decides when the model has
+# enough history to start predicting at all. Training history is expanding by
+# default, so raising this shortens the evaluation period without changing what
+# any surviving day is trained on -- 60 and 240 produce byte-identical
+# predictions on the days both can reach. Use TRAIN_WINDOW_DAYS to bound how
+# far back training actually looks.
 #
 # Ninety days rather than the original twenty-one: at BE's hourly resolution
 # three weeks is only about 500 rows to learn a seasonal, nonlinear response

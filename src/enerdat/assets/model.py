@@ -26,6 +26,7 @@ from enerdat.config import (
     MODEL_RETRAIN_DAYS,
     TARGET_TECHNOLOGY,
     TAU_BOUNDS,
+    TRAIN_WINDOW_DAYS,
     TURBINE_CUT_IN_MS,
     TURBINE_CUT_OUT_MS,
     TURBINE_RATED_MS,
@@ -194,10 +195,14 @@ def walk_forward_predict(
     features: list[str],
     retrain_days: int = MODEL_RETRAIN_DAYS,
     min_train_days: int = MIN_TRAIN_DAYS,
+    train_window_days: int | None = TRAIN_WINDOW_DAYS,
     lag: pd.Timedelta | None = None,
     seed: int = 0,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Predict each delivery day using only data knowable at its gate closure.
+
+    `min_train_days` gates when prediction starts; `train_window_days` bounds
+    how far back each fit looks (None = expanding, i.e. all history).
 
     Returns (predictions aligned to `frame.index`, per-day audit trail).
 
@@ -205,6 +210,14 @@ def walk_forward_predict(
     the training cutoff for that day and the latest interval actually trained
     on, so a test can assert the second never exceeds the first.
     """
+    if train_window_days is not None and train_window_days < min_train_days:
+        raise ValueError(
+            f"train_window_days={train_window_days} is shorter than "
+            f"min_train_days={min_train_days}, so the windowed history can "
+            "never satisfy the gate and the model would silently predict "
+            "nothing. Widen the window or lower the gate."
+        )
+
     lag = pd.Timedelta(ACTUALS_PUBLICATION_LAG) if lag is None else lag
 
     frame = frame.sort_values("valid_time_utc")
@@ -222,7 +235,13 @@ def walk_forward_predict(
         # Everything whose actual had been published by this day's cutoff.
         history = frame[
             (frame["valid_time_utc"] <= cutoff) & frame["actual_mw"].notna()
-        ].dropna(subset=features)
+        ]
+        if train_window_days is not None:
+            # Rolling rather than expanding: forget intervals older than the
+            # window, so the fit describes the fleet as it is now.
+            window_start = cutoff - pd.Timedelta(days=train_window_days)
+            history = history[history["valid_time_utc"] > window_start]
+        history = history.dropna(subset=features)
 
         due = (
             last_fit_date is None

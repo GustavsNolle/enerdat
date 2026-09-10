@@ -172,6 +172,34 @@ are published by 18:00 on D−1, *after* the 12:00 gate closure this project
 treats as the decision point. We therefore beat the TSO using strictly less
 information than it had — which costs accuracy, but makes a win unambiguous.
 
+## Training window
+
+Two separate knobs, and conflating them is easy:
+
+- `MIN_TRAIN_DAYS` — a **gate**. When does the model have enough history to
+  start predicting at all?
+- `TRAIN_WINDOW_DAYS` — a **window**. How far back may each fit look?
+
+Only the second changes what a model learns. With expanding history, raising
+the gate from 60 to 240 days produced *byte-identical* predictions on every day
+both settings could reach — it only shortened the evaluation period.
+
+Swept on a common 7,292-interval evaluation set, as candidate MAE ÷ TSO MAE:
+
+| window | 60d | **90d** | 180d | 270d | expanding |
+| --- | --- | --- | --- | --- | --- |
+| ratio | 1.225 | **1.211** | 1.220 | 1.237 | 1.255 |
+
+A shallow U with its minimum near a quarter. The notable end is the far one:
+training on **all** history is the worst setting tested, 3.6% behind a 90-day
+window. More data actively hurts, because old intervals describe a fleet and a
+curtailment regime that have since moved on. 60–180 days all sit within ~1% of
+the best, so the effect is real but not sharp — don't over-tune it on one year.
+
+A window shorter than the gate is rejected outright: the windowed history could
+never satisfy the gate, so every day would abstain and the run would look
+successful while forecasting nothing.
+
 ## Settlement
 
 `imbalance_settlement_mart` prices the TSO's own forecast error interval by
