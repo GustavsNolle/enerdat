@@ -122,10 +122,13 @@ run on — nothing is retyped by hand.
 ```bash
 dagster asset materialize --select "*" -m enerdat.definitions   # refresh the marts
 cd reports && npm install
-npx evidence sources     # extract the marts to parquet
-npx evidence dev         # localhost:3000
-npx evidence build       # static site in reports/build
+npm run sources          # extract the marts to parquet
+npm run dev              # localhost:3001
+npm run build            # static site in reports/build
 ```
+
+The dev server is pinned to **3001**, since 3000 is taken. The scripts use POSIX
+`VAR=x cmd` syntax, so on Windows set `PORT` separately.
 
 `reports/build` is a plain static site — host it anywhere (Netlify, Cloudflare
 Pages, GitHub Pages, S3) or use Evidence Studio. The DuckDB path in

@@ -5,8 +5,9 @@
   "private": true,
   "scripts": {
     "sources": "evidence sources",
-    "dev": "evidence dev",
-    "build": "evidence build"
+    "dev": "PORT=3001 evidence dev",
+    "build": "evidence build",
+    "preview": "PORT=3001 evidence preview"
   },
   "devDependencies": {
     "@evidence-dev/evidence": "40.1.8",
