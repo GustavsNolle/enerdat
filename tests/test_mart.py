@@ -68,6 +68,27 @@ def _write_weather(lake, issue_offset_days, retrieved_at):
     lake.write("openmeteo_archived_forecast", DELIVERY_DATE, pd.DataFrame(rows), retrieved_at)
 
 
+def _write_prices(lake, retrieved_at):
+    """Imbalance and day-ahead prices, which the mart now carries for settlement."""
+    index = _quarter_hours(DELIVERY_DATE)
+    for dataset, rows in {
+        "entsoe_imbalance_price": [("Long", 40.0), ("Short", 160.0)],
+        "entsoe_day_ahead_price": [("day_ahead_price", 100.0)],
+    }.items():
+        frame = pd.concat(
+            [
+                pd.DataFrame({
+                    "valid_time_utc": index, "variable": name, "value": value,
+                    "zone": "BE", "delivery_date": DELIVERY_DATE,
+                    "retrieved_at_utc": retrieved_at,
+                })
+                for name, value in rows
+            ],
+            ignore_index=True,
+        )
+        lake.write(dataset, DELIVERY_DATE, frame, retrieved_at)
+
+
 def _build(tmp_path, issue_offset_days):
     lake = LakeResource(root=str(tmp_path / "raw"))
     duckdb = DuckDBResource(database=str(tmp_path / "test.duckdb"))
@@ -84,6 +105,7 @@ def _build(tmp_path, issue_offset_days):
         t0 + pd.Timedelta(days=1),
     )
     _write_weather(lake, issue_offset_days, t0)
+    _write_prices(lake, t0)
 
     resources = {"lake": lake, "duckdb": duckdb}
     result = dg.materialize([forecast_error_mart], resources=resources)
@@ -173,6 +195,7 @@ def _build_with_scale(tmp_path, actual_scale):
         lambda i: shape(i) * actual_scale + np.cos(np.arange(len(i))) * 3, t0,
     )
     _write_weather(lake, 2, t0)
+    _write_prices(lake, t0)
 
     resources = {"lake": lake, "duckdb": duckdb}
     assert dg.materialize([forecast_error_mart], resources=resources).success

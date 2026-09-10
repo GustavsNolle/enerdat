@@ -12,38 +12,24 @@ DELIVERY_DATE = "2026-08-28"
 T0 = pd.Timestamp("2026-08-29T06:00:00Z")
 
 
-def _setup(tmp_path, actual, scheduled, price_long, price_short, n=4, candidate=None):
+def _setup(tmp_path, actual, scheduled, price_long, price_short, n=4,
+           candidate=None, day_ahead=0.0):
     """Build a tiny candidate_forecast table plus matching prices."""
     lake = LakeResource(root=str(tmp_path / "raw"))
     duckdb = DuckDBResource(database=str(tmp_path / "s.duckdb"))
     index = pd.date_range("2026-08-28T00:00:00Z", periods=n, freq="15min")
-
-    lake.write(
-        "entsoe_imbalance_price",
-        DELIVERY_DATE,
-        pd.concat(
-            [
-                pd.DataFrame({"valid_time_utc": index, "variable": "Long",
-                              "value": price_long, "zone": "NL",
-                              "delivery_date": DELIVERY_DATE, "retrieved_at_utc": T0}),
-                pd.DataFrame({"valid_time_utc": index, "variable": "Short",
-                              "value": price_short, "zone": "NL",
-                              "delivery_date": DELIVERY_DATE, "retrieved_at_utc": T0}),
-            ],
-            ignore_index=True,
-        ),
-        T0,
-    )
 
     with duckdb.get_connection() as conn:
         cand = "NULL::DOUBLE" if candidate is None else f"{candidate}::DOUBLE"
         conn.execute("CREATE OR REPLACE TABLE candidate_forecast AS SELECT * FROM (VALUES " +
                      ",".join(
                          f"(TIMESTAMPTZ '{t.isoformat()}', DATE '{DELIVERY_DATE}', "
-                         f"{actual}::DOUBLE, {scheduled}::DOUBLE, {cand})" for t in index
+                         f"{actual}::DOUBLE, {scheduled}::DOUBLE, {cand}, "
+                         f"{day_ahead}::DOUBLE, {price_long}::DOUBLE, {price_short}::DOUBLE)"
+                         for t in index
                      ) +
                      ") AS t(valid_time_utc, delivery_date, actual_mw, tso_forecast_mw,"
-                     " candidate_mw)")
+                     " candidate_mw, price_day_ahead, price_long, price_short)")
 
     resources = {"lake": lake, "duckdb": duckdb}
     assert dg.materialize([imbalance_settlement_mart], resources=resources).success
@@ -152,3 +138,34 @@ def test_a_bigger_absolute_error_can_settle_cheaper(tmp_path):
     assert tso_cost == pytest.approx(400.0)
     assert candidate_cost == pytest.approx(-400.0), "long at a positive price earns"
     assert savings == pytest.approx(800.0)
+
+
+def test_opportunity_cost_is_measured_against_the_day_ahead_price(tmp_path):
+    """The schedule was already sold at day-ahead, so only the spread costs.
+
+    Short by 8 MW for 15 min = -2 MWh, bought back at the 200 short price
+    having sold at 100: the loss is the 100 spread on 2 MWh, not the full 400.
+    """
+    rows = _setup(
+        tmp_path, actual=92, scheduled=100,
+        price_long=50, price_short=200, day_ahead=100,
+    )
+    mwh, settlement, cost, _, _, _ = rows[0]
+    assert mwh == pytest.approx(-2.0)
+    assert settlement == pytest.approx(-400.0), "raw cash exchanged is unchanged"
+    assert cost == pytest.approx(200.0), "opportunity cost is the spread only"
+
+
+def test_imbalance_at_the_day_ahead_price_is_free(tmp_path):
+    """Deviating costs nothing when the imbalance price equals day-ahead.
+
+    Raw settlement still shows cash moving, which is exactly why it is the
+    wrong thing to minimise.
+    """
+    rows = _setup(
+        tmp_path, actual=92, scheduled=100,
+        price_long=100, price_short=100, day_ahead=100,
+    )
+    _, settlement, cost, _, _, _ = rows[0]
+    assert settlement == pytest.approx(-200.0)
+    assert cost == pytest.approx(0.0)

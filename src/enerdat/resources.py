@@ -159,16 +159,20 @@ class OpenMeteoResource(dg.ConfigurableResource):
         start_date: str,
         end_date: str,
         variables: list[str],
-        lead_days: int,
+        leads: tuple[int, ...],
     ) -> pd.DataFrame:
-        """Hourly archived forecast for one grid point, at a fixed lead time.
+        """Hourly archived forecasts for one grid point, at several lead times.
 
-        `lead_days` selects Open-Meteo's `previous_dayN` variant, i.e. the run
+        Each lead selects Open-Meteo's `previous_dayN` variant, i.e. the run
         issued roughly N days before each valid time. Requesting the plain
         variable would return the *latest* available run, which for historical
         dates is a short-lead forecast and would leak.
+
+        All leads come back in one request; the caller picks per interval.
         """
-        suffixed = [f"{v}_previous_day{lead_days}" for v in variables]
+        suffixed = [
+            f"{v}_previous_day{lead}" for lead in leads for v in variables
+        ]
         params = {
             "latitude": lat,
             "longitude": lon,
@@ -203,16 +207,22 @@ class OpenMeteoResource(dg.ConfigurableResource):
         frame = pd.DataFrame(hourly)
         frame["time"] = pd.to_datetime(frame["time"], utc=True)
 
-        # Drop the _previous_dayN suffix so downstream schemas are stable
-        # across lead-time changes; the lead time is recorded as a column.
-        renames = {f"{v}_previous_day{lead_days}": v for v in variables}
-        frame = frame.rename(columns=renames)
+        # One tidy block per lead, so the lead is a column rather than part of
+        # the variable name and downstream schemas stay stable.
+        blocks = []
+        for lead in leads:
+            columns = {f"{v}_previous_day{lead}": v for v in variables}
+            present = {k: v for k, v in columns.items() if k in frame.columns}
+            if not present:
+                continue
+            block = frame[["time", *present]].rename(columns=present)
+            block = block.melt(
+                id_vars="time", var_name="variable", value_name="value"
+            ).rename(columns={"time": "valid_time_utc"})
+            block["lead_days"] = lead
+            blocks.append(block)
 
-        long = frame.melt(
-            id_vars="time", var_name="variable", value_name="value"
-        ).rename(columns={"time": "valid_time_utc"})
-        long["lead_days"] = lead_days
-        return long
+        return pd.concat(blocks, ignore_index=True)
 
 
 class LakeResource(dg.ConfigurableResource):

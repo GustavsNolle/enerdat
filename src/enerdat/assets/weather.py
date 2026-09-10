@@ -8,7 +8,7 @@ from enerdat.config import (
     GRID_POINTS,
     MARKET_TZ,
     OPEN_METEO_MODEL,
-    WEATHER_LEAD_DAYS,
+    WEATHER_LEAD_DAYS_OPTIONS,
     WEATHER_VARIABLES,
 )
 from enerdat.partitions import daily_partitions, delivery_window, gate_closure
@@ -54,7 +54,7 @@ def openmeteo_archived_forecast(
             start_date=request_start,
             end_date=request_end,
             variables=WEATHER_VARIABLES,
-            lead_days=WEATHER_LEAD_DAYS,
+            leads=WEATHER_LEAD_DAYS_OPTIONS,
         )
         long["site"] = point["name"]
         long["weight"] = point["weight"]
@@ -70,39 +70,55 @@ def openmeteo_archived_forecast(
     )
     combined = combined[combined["delivery_date"].isin(set(keys))]
 
-    # Conservative bound on when the source model run was issued. The real run
-    # is at or before this instant, so proving this <= gate closure proves the
-    # feature was knowable in time.
-    combined["issue_time_utc"] = combined["valid_time_utc"] - pd.Timedelta(
-        days=WEATHER_LEAD_DAYS
+    # Conservative bound on when each run was issued. The real run is at or
+    # before this instant, so proving this <= gate closure proves the feature
+    # was knowable in time.
+    combined["issue_time_utc"] = combined["valid_time_utc"] - pd.to_timedelta(
+        combined["lead_days"], unit="D"
     )
     combined["model"] = OPEN_METEO_MODEL
     combined["retrieved_at_utc"] = retrieved_at
 
-    # Checked per delivery day rather than against the range maximum: one
-    # leaking day inside an otherwise clean backfill must still fail.
+    # Gate closure is per delivery day, so the legality of a given lead varies
+    # across the day: a 1-day lead is fine for a morning hour and too late for
+    # an evening one.
     closures = {key: gate_closure(key) for key in keys}
-    deadline = combined["delivery_date"].map(closures)
-    leaking = combined[combined["issue_time_utc"] > deadline]
-    if len(leaking):
-        worst = leaking["delivery_date"].unique()[:5]
+    combined["gate_closure_utc"] = combined["delivery_date"].map(closures)
+
+    # Drop everything illegal FIRST, then keep the freshest survivor. Selection
+    # can only ever choose among rows that already predate gate closure, so no
+    # ordering mistake here can produce a leak.
+    legal = combined[combined["issue_time_utc"] <= combined["gate_closure_utc"]]
+    dropped = len(combined) - len(legal)
+
+    fresh = (
+        legal.sort_values("lead_days")
+        .drop_duplicates(subset=["site", "variable", "valid_time_utc"], keep="first")
+        .sort_values(["valid_time_utc", "site", "variable"])
+    )
+
+    if fresh.empty:
         raise ValueError(
-            f"Refusing to land leaking features: {len(leaking)} rows across "
-            f"{leaking['delivery_date'].nunique()} day(s) have an implied issue "
-            f"time after gate closure (e.g. {list(worst)}). Raise "
-            "WEATHER_LEAD_DAYS."
+            "No legal weather rows survived the gate-closure filter. Every "
+            "candidate lead in WEATHER_LEAD_DAYS_OPTIONS is issued too late."
         )
 
+    # Belt and braces: the filter above should make this impossible.
+    assert (fresh["issue_time_utc"] <= fresh["gate_closure_utc"]).all()
+
+    combined = fresh
     written = 0
     for delivery_date, part in combined.groupby("delivery_date"):
         lake.write("openmeteo_archived_forecast", delivery_date, part, retrieved_at)
         written += 1
 
     headroom_hours = (
-        ((deadline - combined["issue_time_utc"]).dt.total_seconds() / 3600).min()
-        if len(combined)
-        else 0
+        (combined["gate_closure_utc"] - combined["issue_time_utc"])
+        .dt.total_seconds()
+        .div(3600)
+        .min()
     )
+    lead_mix = combined["lead_days"].value_counts().sort_index().to_dict()
 
     return dg.MaterializeResult(
         metadata={
@@ -111,7 +127,11 @@ def openmeteo_archived_forecast(
             "requests": len(GRID_POINTS),
             "partitions_requested": len(keys),
             "partitions_written": written,
-            "lead_days": WEATHER_LEAD_DAYS,
+            "leads_offered": dg.MetadataValue.json(list(WEATHER_LEAD_DAYS_OPTIONS)),
+            "rows_dropped_as_too_late": dropped,
+            "lead_days_used": dg.MetadataValue.json(
+                {str(k): int(v) for k, v in lead_mix.items()}
+            ),
             "min_headroom_hours": round(float(headroom_hours), 1),
         }
     )

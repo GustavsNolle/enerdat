@@ -183,3 +183,27 @@ def entsoe_imbalance_price(
     keys, start, end = _range_window(context)
     frame = entsoe.fetch_range("query_imbalance_prices", ZONE, start=start, end=end)
     return _materialise(context, lake, "entsoe_imbalance_price", frame, keys)
+
+
+@dg.asset(
+    partitions_def=daily_partitions,
+    backfill_policy=dg.BackfillPolicy.single_run(),
+    group_name="raw_entsoe",
+    kinds={"python", "parquet"},
+    description=(
+        "Day-ahead auction clearing price (article 12.1.D). Needed because "
+        "imbalance cost is only well defined relative to it: the schedule was "
+        "already sold at this price, so the cost of deviating is the spread "
+        "between it and the imbalance price, not the imbalance price itself."
+    ),
+)
+def entsoe_day_ahead_price(
+    context: AssetExecutionContext,
+    entsoe: EntsoeResource,
+    lake: LakeResource,
+) -> dg.MaterializeResult:
+    keys, start, end = _range_window(context)
+    series = entsoe.fetch_range("query_day_ahead_prices", ZONE, start=start, end=end)
+    if series is not None:
+        series = series.rename("day_ahead_price")
+    return _materialise(context, lake, "entsoe_day_ahead_price", series, keys)

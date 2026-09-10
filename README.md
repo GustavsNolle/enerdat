@@ -29,11 +29,20 @@ So this pipeline uses **archived forecasts**, not archived weather:
 | `historical-forecast-api.open-meteo.com` | Archived model runs. What was predicted, at the time. **This one.** |
 
 Lead time is pinned via Open-Meteo's `previous_dayN` variables, which select the
-run issued roughly N days before each valid time. `WEATHER_LEAD_DAYS = 2`, because
-`N=1` is issued ~24h before valid time — which for a 13:00 delivery hour means a
-run from 13:00 on D−1, an hour *after* gate closure. `N=2` clears the deadline for
-every hour of the day. It costs forecast skill to buy a bound that holds without
-special-casing.
+run issued roughly N days before each valid time. Whether a given lead is legal
+**varies across the delivery day**: `N=1` is issued ~24h before valid time, which
+is fine for a morning hour but for 13:00 means a run from 13:00 on D−1, an hour
+*after* gate closure.
+
+So both leads are fetched in one request, every row whose implied issue time
+post-dates its own day's gate closure is **dropped first**, and the freshest
+survivor is kept per interval. Selection can only ever choose among legal rows,
+so no ordering mistake can produce a leak. In practice ~54% of intervals get the
+fresher 1-day lead and the rest fall back to 2 days; minimum headroom measured
+0.0h and 12.0h respectively, with zero rows past the deadline.
+
+Using `N=2` uniformly, as this originally did, threw that skill away — it cost
+13.6% of candidate MAE.
 
 This is not left to a comment. `checks.leakage_free_features` recomputes the
 implied issue time of every feature and fails the asset if any of them post-dates

@@ -20,55 +20,55 @@ Under a single-price regime the two price columns carry the same value and the
 arithmetic is unchanged.
 """
 
-from pathlib import Path
-
 import dagster as dg
 from dagster import AssetExecutionContext
 from dagster_duckdb import DuckDBResource
 
 from enerdat.config import TARGET_TECHNOLOGY, ZONE
-from enerdat.resources import LakeResource
 
 
 def _settle(schedule: str, prefix: str) -> str:
-    """Settlement columns for one schedule. Same arithmetic for every schedule,
-    so the baseline and the candidate can never drift apart."""
+    """Settlement columns for one schedule.
+
+    Two measures, because they answer different questions:
+
+    *_settlement_eur is the raw cash exchanged on the imbalance market.
+
+    *_cost_eur is the opportunity cost, and it is the one to optimise. The
+    schedule was already sold at the day-ahead price, so deviating costs the
+    spread between that price and the imbalance price:
+
+        cost = (actual - scheduled) * hours * (P_dayahead - P_imbalance)
+
+    Long into a price below day-ahead costs money; short into a price above it
+    costs money; both are non-negative in the normal regime. The raw settlement
+    figure is not a well-posed objective -- minimising it would push the
+    schedule to zero whenever the long price is positive.
+    """
     dev = f"(p.actual_mw - p.{schedule})"
     guard = f"p.actual_mw IS NULL OR p.{schedule} IS NULL"
+    imbalance_price = (
+        f"CASE WHEN {dev} >= 0 THEN p.price_long ELSE p.price_short END"
+    )
     return f"""
     {dev} * p.interval_hours                                 AS {prefix}_imbalance_mwh,
     CASE WHEN {guard} THEN NULL
-         WHEN {dev} >= 0 THEN {dev} * p.interval_hours * pr.price_long
-         ELSE                 {dev} * p.interval_hours * pr.price_short
+         ELSE {dev} * p.interval_hours * ({imbalance_price})
     END                                                      AS {prefix}_settlement_eur,
-    CASE WHEN {guard} THEN NULL
-         WHEN {dev} >= 0 THEN -({dev} * p.interval_hours * pr.price_long)
-         ELSE                 -({dev} * p.interval_hours * pr.price_short)
+    CASE WHEN {guard} OR p.price_day_ahead IS NULL THEN NULL
+         ELSE {dev} * p.interval_hours
+              * (p.price_day_ahead - ({imbalance_price}))
     END                                                      AS {prefix}_cost_eur"""
 
 
 SETTLEMENT_SQL = f"""
 CREATE OR REPLACE TABLE imbalance_settlement AS
-WITH prices AS (
-    SELECT
-        valid_time_utc,
-        max(CASE WHEN variable = 'Long'  THEN value END) AS price_long,
-        max(CASE WHEN variable = 'Short' THEN value END) AS price_short
-    FROM (
-        SELECT valid_time_utc, variable, value
-        FROM read_parquet($imbalance_glob)
-        QUALIFY row_number() OVER (
-            PARTITION BY valid_time_utc, variable ORDER BY retrieved_at_utc DESC
-        ) = 1
-    )
-    GROUP BY valid_time_utc
-),
-paced AS (
+WITH paced AS (
     SELECT
         *,
         -- Derive the settlement period from the data rather than assuming 15
-        -- or 60 minutes: the market moved to quarter-hourly MTU mid-history,
-        -- and a DST day contains an interval of a different length.
+        -- or 60 minutes: resolution differs by zone, changed mid-history, and
+        -- a DST day contains an interval of a different length.
         coalesce(
             date_diff(
                 'second',
@@ -86,39 +86,32 @@ SELECT
     p.actual_mw,
     p.tso_forecast_mw,
     p.candidate_mw,
-    pr.price_long,
-    pr.price_short,
+    p.price_day_ahead,
+    p.price_long,
+    p.price_short,
     {_settle("tso_forecast_mw", "tso")},
     {_settle("candidate_mw", "candidate")},
     -- The headline. Positive means the candidate schedule cost less to settle
     -- than the TSO's own forecast would have.
     CASE
-        WHEN p.candidate_mw IS NULL THEN NULL
+        WHEN p.candidate_mw IS NULL OR p.price_day_ahead IS NULL THEN NULL
         ELSE (
-            CASE WHEN (p.actual_mw - p.tso_forecast_mw) >= 0
-                 THEN -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_long)
-                 ELSE -((p.actual_mw - p.tso_forecast_mw) * p.interval_hours * pr.price_short)
-            END
+            (p.actual_mw - p.tso_forecast_mw) * p.interval_hours
+              * (p.price_day_ahead - CASE WHEN (p.actual_mw - p.tso_forecast_mw) >= 0
+                                          THEN p.price_long ELSE p.price_short END)
             -
-            CASE WHEN (p.actual_mw - p.candidate_mw) >= 0
-                 THEN -((p.actual_mw - p.candidate_mw) * p.interval_hours * pr.price_long)
-                 ELSE -((p.actual_mw - p.candidate_mw) * p.interval_hours * pr.price_short)
-            END
+            (p.actual_mw - p.candidate_mw) * p.interval_hours
+              * (p.price_day_ahead - CASE WHEN (p.actual_mw - p.candidate_mw) >= 0
+                                          THEN p.price_long ELSE p.price_short END)
         )
     END                                                      AS savings_eur
 FROM paced AS p
-LEFT JOIN prices AS pr USING (valid_time_utc)
 ORDER BY p.valid_time_utc
 """
 
 
-def _has_files(glob: str) -> bool:
-    root = Path(glob.split("**")[0])
-    return root.exists() and any(root.rglob("*.parquet"))
-
-
 @dg.asset(
-    deps=["candidate_forecast", "entsoe_imbalance_price"],
+    deps=["candidate_forecast"],
     group_name="marts",
     kinds={"duckdb", "sql"},
     description=(
@@ -131,20 +124,9 @@ def _has_files(glob: str) -> bool:
 def imbalance_settlement_mart(
     context: AssetExecutionContext,
     duckdb: DuckDBResource,
-    lake: LakeResource,
 ) -> dg.MaterializeResult:
-    imbalance_glob = lake.glob("entsoe_imbalance_price")
-    if not _has_files(imbalance_glob):
-        raise dg.Failure(
-            description=(
-                f"No landed imbalance prices. {ZONE} must publish article 17 "
-                "data at bidding-zone level -- DE_LU does not, which is why "
-                "the default zone is NL."
-            )
-        )
-
     with duckdb.get_connection() as connection:
-        connection.execute(SETTLEMENT_SQL, {"imbalance_glob": imbalance_glob})
+        connection.execute(SETTLEMENT_SQL)
         (
             rows,
             priced,

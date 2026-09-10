@@ -21,8 +21,10 @@ from dagster_duckdb import DuckDBResource
 from enerdat.config import (
     ACTUALS_PUBLICATION_LAG,
     MIN_TRAIN_DAYS,
+    MODEL_OBJECTIVE,
     MODEL_RETRAIN_DAYS,
     TARGET_TECHNOLOGY,
+    TAU_BOUNDS,
     USE_TSO_FORECAST_AS_FEATURE,
     WEATHER_VARIABLES,
     ZONE,
@@ -52,6 +54,58 @@ def add_calendar_features(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def cost_optimal_tau(history: pd.DataFrame) -> float | None:
+    """The quantile that minimises settlement cost, from realised prices.
+
+    c_long  = day-ahead price - long price   (cost per MWh of over-delivering)
+    c_short = short price - day-ahead price  (cost per MWh of under-delivering)
+
+    Negative values mean that direction actually paid in that interval; they
+    are floored at zero rather than allowed to offset, so one very profitable
+    hour cannot argue the schedule into a reckless bias.
+
+    Returns None when prices are missing, which the caller treats as "fall back
+    to the megawatt objective" rather than guessing.
+    """
+    needed = {"price_day_ahead", "price_long", "price_short"}
+    if not needed.issubset(history.columns):
+        return None
+
+    priced = history.dropna(subset=list(needed))
+    if priced.empty:
+        return None
+
+    c_long = (priced["price_day_ahead"] - priced["price_long"]).clip(lower=0).mean()
+    c_short = (priced["price_short"] - priced["price_day_ahead"]).clip(lower=0).mean()
+
+    total = c_long + c_short
+    if not total or not np.isfinite(total):
+        return None
+
+    low, high = TAU_BOUNDS
+    return float(np.clip(c_long / total, low, high))
+
+
+def _fit(history: pd.DataFrame, features: list[str], seed: int):
+    """Fit the candidate, and report the objective actually used."""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    tau = cost_optimal_tau(history) if MODEL_OBJECTIVE == "euros" else None
+
+    if tau is None:
+        model = HistGradientBoostingRegressor(
+            max_iter=300, learning_rate=0.06, random_state=seed
+        )
+    else:
+        model = HistGradientBoostingRegressor(
+            loss="quantile", quantile=tau,
+            max_iter=300, learning_rate=0.06, random_state=seed,
+        )
+
+    model.fit(history[features], history["actual_mw"])
+    return model, tau
+
+
 def walk_forward_predict(
     frame: pd.DataFrame,
     features: list[str],
@@ -68,8 +122,6 @@ def walk_forward_predict(
     the training cutoff for that day and the latest interval actually trained
     on, so a test can assert the second never exceeds the first.
     """
-    from sklearn.ensemble import HistGradientBoostingRegressor
-
     lag = pd.Timedelta(ACTUALS_PUBLICATION_LAG) if lag is None else lag
 
     frame = frame.sort_values("valid_time_utc")
@@ -77,6 +129,7 @@ def walk_forward_predict(
     audit = []
 
     model = None
+    tau = None
     last_fit_date = None
 
     for delivery_date, day in frame.groupby("delivery_date", sort=True):
@@ -112,10 +165,7 @@ def walk_forward_predict(
             continue
 
         if due or model is None:
-            model = HistGradientBoostingRegressor(
-                max_iter=300, learning_rate=0.06, random_state=seed
-            )
-            model.fit(history[features], history["actual_mw"])
+            model, tau = _fit(history, features, seed)
             last_fit_date = delivery_date
 
         usable = day.dropna(subset=features)
@@ -131,6 +181,7 @@ def walk_forward_predict(
                 "max_train_valid_time_utc": history["valid_time_utc"].max(),
                 "refit": bool(due),
                 "predicted": bool(len(usable)),
+                "tau": tau,
             }
         )
 

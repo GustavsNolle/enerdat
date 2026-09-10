@@ -60,21 +60,26 @@ MAX_QUERY_DAYS = 60
 # instant may be used as a feature for day D.
 GATE_CLOSURE_LOCAL = dt.time(12, 0)
 
-# Which archived weather run to use, expressed as Open-Meteo's `previous_dayN`
-# lead-time offset.
+# Which archived weather runs to fetch, as Open-Meteo `previous_dayN` offsets.
 #
-#   previous_day1 -> run issued ~24h before valid time.
-#   previous_day2 -> run issued ~48h before valid time.
+# previous_dayN is the forecast for a timestamp taken from the run issued
+# roughly N days earlier. For delivery day D with gate closure at 12:00 local
+# on D-1:
 #
-# For delivery day D, valid times run from D 00:00 to D 23:59. With N=1, the
-# run behind D 13:00 was issued ~D-1 13:00 -- an hour AFTER gate closure. So
-# N=1 leaks for every afternoon and evening hour. N=2 is issued at the latest
-# D-2 23:00, comfortably before D-1 12:00, and is safe for every hour of D.
+#   N=1  issued ~T-24h. Legal for T up to D 12:00, because that run predates
+#        gate closure. For an afternoon or evening hour it does NOT: the run
+#        behind D 13:00 was issued around 13:00 on D-1, an hour too late.
+#   N=2  issued ~T-48h, at the latest D-2 23:00. Legal for every hour of D.
 #
-# This is deliberately conservative: it costs forecast skill to buy a bound
-# that holds for all 24 hours without special-casing. `leakage_free_features`
-# in checks.py proves it rather than trusting this comment.
-WEATHER_LEAD_DAYS = 2
+# Fetching both and taking the freshest legal one per interval recovers a full
+# day of forecast skill for the morning half of every delivery day, at no cost
+# to correctness: the asset drops any row whose implied issue time is after its
+# own day's gate closure BEFORE choosing, so a leak cannot survive the choice.
+# Using N=2 uniformly, as this did originally, threw that skill away.
+WEATHER_LEAD_DAYS_OPTIONS = (1, 2)
+
+# The lead used when nothing fresher is legal; also what the mart reports.
+WEATHER_LEAD_DAYS = max(WEATHER_LEAD_DAYS_OPTIONS)
 
 # --- model ---
 
@@ -107,6 +112,37 @@ MIN_TRAIN_DAYS = 21
 # feature and we are beating it with strictly less information than it had --
 # but a win under this rule is unambiguous, and a loss is explicable.
 USE_TSO_FORECAST_AS_FEATURE = False
+
+# What the model minimises.
+#
+#   "mw"     squared error. Targets the middle of the distribution -- the
+#            best estimate of megawatts, which is what the TSO publishes.
+#   "euros"  the settlement cost itself.
+#
+# The second is not a tweak of the first, it is a different problem. Cost of
+# scheduling S when the outturn is A is
+#
+#     c_long * (A - S)+   +   c_short * (S - A)+
+#
+# with c_long = P_dayahead - P_long and c_short = P_short - P_dayahead, both
+# normally positive: the schedule was already sold at the day-ahead price, so
+# deviating costs the spread between it and the imbalance price.
+#
+# That is pinball loss, so the cost-minimising schedule is not the mean but the
+# tau-quantile of the outturn distribution, with
+#
+#     tau = c_long / (c_long + c_short)
+#
+# Being short is usually punished harder than being long is rewarded, which
+# puts tau below 0.5 and deliberately biases the schedule low. That is the
+# whole edge: it needs no better weather than the TSO has, only a different
+# objective. tau is estimated from the training window alone, so it stays as
+# causal as everything else.
+MODEL_OBJECTIVE = "euros"
+
+# Bounds on the estimated tau. A window where prices went one-sided can imply a
+# degenerate quantile; clamping keeps the schedule sane.
+TAU_BOUNDS = (0.05, 0.95)
 
 # --- weather sampling --------------------------------------------------------
 

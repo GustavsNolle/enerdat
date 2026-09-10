@@ -51,6 +51,27 @@ actual AS (
     WHERE variable = $technology
     {_LATEST}
 ),
+prices AS (
+    SELECT
+        valid_time_utc,
+        max(CASE WHEN variable = 'Long'  THEN value END) AS price_long,
+        max(CASE WHEN variable = 'Short' THEN value END) AS price_short
+    FROM (
+        SELECT valid_time_utc, variable, value
+        FROM read_parquet($imbalance_glob)
+        WHERE variable IN ('Long', 'Short')
+        QUALIFY row_number() OVER (
+            PARTITION BY valid_time_utc, variable ORDER BY retrieved_at_utc DESC
+        ) = 1
+    )
+    GROUP BY valid_time_utc
+),
+day_ahead AS (
+    SELECT valid_time_utc, value AS price_day_ahead
+    FROM read_parquet($dayahead_glob)
+    WHERE variable = 'day_ahead_price'
+    {_LATEST}
+),
 weather AS (
     SELECT
         w.valid_time_utc,
@@ -70,11 +91,19 @@ SELECT
     f.tso_forecast_mw,
     a.actual_mw,
     a.actual_mw - f.tso_forecast_mw                          AS tso_error_mw,
+    -- Prices are carried for settlement and for estimating the cost-optimal
+    -- objective from history. They are deliberately NOT features: the
+    -- imbalance price for delivery day D is unknown at its gate closure.
+    da.price_day_ahead,
+    pr.price_long,
+    pr.price_short,
     w.* EXCLUDE (valid_time_utc),
     $lead_days                                               AS weather_lead_days
 FROM tso_forecast AS f
-LEFT JOIN actual  AS a USING (valid_time_utc)
-LEFT JOIN weather AS w
+LEFT JOIN actual    AS a  USING (valid_time_utc)
+LEFT JOIN prices    AS pr USING (valid_time_utc)
+LEFT JOIN day_ahead AS da USING (valid_time_utc)
+LEFT JOIN weather   AS w
        ON w.valid_time_utc = date_trunc('hour', f.valid_time_utc)
 ORDER BY f.valid_time_utc
 """
@@ -90,6 +119,8 @@ def _has_files(glob: str) -> bool:
         "entsoe_day_ahead_forecast",
         "entsoe_actual_generation",
         "openmeteo_archived_forecast",
+        "entsoe_imbalance_price",
+        "entsoe_day_ahead_price",
     ],
     group_name="marts",
     kinds={"duckdb", "sql"},
@@ -110,15 +141,36 @@ def forecast_error_mart(
         "forecast_glob": lake.glob("entsoe_day_ahead_forecast"),
         "actual_glob": lake.glob("entsoe_actual_generation"),
         "weather_glob": lake.glob("openmeteo_archived_forecast"),
+        "imbalance_glob": lake.glob("entsoe_imbalance_price"),
+        "dayahead_glob": lake.glob("entsoe_day_ahead_price"),
     }
 
-    missing = [name for name, g in globs.items() if not _has_files(g)]
-    if missing:
+    # Forecast, actual and weather are the mart. Prices are carried for
+    # settlement, and a zone can legitimately not publish them -- DE_LU has no
+    # bidding-zone imbalance price at all -- so their absence degrades the mart
+    # rather than failing it. The cost columns downstream become NULL, and the
+    # model reports that it fell back to the megawatt objective.
+    required = ["forecast_glob", "actual_glob", "weather_glob"]
+    optional = ["imbalance_glob", "dayahead_glob"]
+
+    missing_required = [n for n in required if not _has_files(globs[n])]
+    if missing_required:
         raise dg.Failure(
             description=(
-                f"No landed parquet for: {', '.join(missing)}. Materialise the "
-                "raw assets for at least one partition first."
+                f"No landed parquet for: {', '.join(missing_required)}. "
+                "Materialise the raw assets for at least one partition first."
             )
+        )
+
+    missing_optional = [n for n in optional if not _has_files(globs[n])]
+    for name in missing_optional:
+        # An unmatched glob would raise; point it at the forecast files and
+        # filter every row out, so the CTE exists with the right shape.
+        globs[name] = globs["forecast_glob"]
+    if missing_optional:
+        context.log.warning(
+            f"No price data for {', '.join(missing_optional)} -- settlement "
+            "costs will be NULL and the model cannot use the euro objective."
         )
 
     with duckdb.get_connection() as connection:
