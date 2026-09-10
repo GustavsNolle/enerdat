@@ -276,26 +276,42 @@ WEATHER_LAG_STEPS = (-3, -1, 1, 3)
 
 # --- weather sampling --------------------------------------------------------
 
-# Polish onshore wind, sampled by voivodeship centroid and weighted by
-# installed MW. Weights are approximate regional shares of a fleet around
-# 9-10 GW and should be refined against
-# query_installed_generation_capacity_per_unit.
+# The Belgian offshore wind zone, grouped into five sampling points. Weights are
+# installed MW summed from query_installed_generation_capacity_per_unit, which
+# lists ten BE offshore units totalling 2260.8 MW.
 #
-# This is a very different spatial problem from Belgium. The Belgian fleet sat
-# inside 30 km of North Sea and moved as one block; Poland's spans roughly 600
-# km from the Baltic coast to Silesia, so a front crosses it over hours rather
-# than minutes. The per-site columns and cross-site spread should carry far
-# more signal here than they did in BE, where they were near-duplicates.
+# These MUST match ZONE. They did not once: after re-pointing from PL back to
+# BE, ZONE and TARGET_TECHNOLOGY were changed and these were left as Polish
+# voivodeships, so a Belgian fleet was modelled on weather from 1,000 km away.
+# Nothing failed, because the intraday feature set leans on lagged outturn and
+# the TSO forecast, which carried the model while the weather columns were
+# noise. checks.grid_points_match_zone now fails on that.
 GRID_POINTS = [
-    {"name": "Zachodniopomorskie", "lat": 53.50, "lon": 15.50, "weight": 1900.0},
-    {"name": "Pomorskie",          "lat": 54.20, "lon": 18.00, "weight": 1300.0},
-    {"name": "Kujawsko-Pomorskie", "lat": 53.00, "lon": 18.50, "weight": 1300.0},
-    {"name": "Wielkopolskie",      "lat": 52.40, "lon": 17.00, "weight": 1400.0},
-    {"name": "Lodzkie",            "lat": 51.70, "lon": 19.30, "weight": 1000.0},
-    {"name": "Warminsko-Mazurskie","lat": 53.80, "lon": 20.50, "weight": 600.0},
-    {"name": "Podlaskie",          "lat": 53.10, "lon": 23.00, "weight": 400.0},
-    {"name": "Dolnoslaskie",       "lat": 51.00, "lon": 17.00, "weight": 500.0},
+    {"name": "Norther",              "lat": 51.53, "lon": 3.00, "weight": 370.0},
+    {"name": "Thorntonbank C-Power", "lat": 51.55, "lon": 2.93, "weight": 325.2},
+    {"name": "Rentel + Northwind",   "lat": 51.60, "lon": 2.92, "weight": 523.0},
+    {"name": "Seastar + Mermaid",    "lat": 51.65, "lon": 2.85, "weight": 487.5},
+    {"name": "Belwind + NW2",        "lat": 51.67, "lon": 2.80, "weight": 555.1},
 ]
+
+# Rough centre of each bidding zone, used only to assert GRID_POINTS are
+# plausibly inside the zone they claim to model.
+ZONE_CENTROIDS = {
+    "BE":    (50.6, 4.4),
+    "NL":    (52.2, 5.3),
+    "PL":    (52.1, 19.4),
+    "DE_LU": (51.1, 10.4),
+    "FR":    (46.6, 2.5),
+    "DK_1":  (56.2, 9.5),
+    "DK_2":  (55.5, 11.8),
+    "ES":    (40.2, -3.6),
+    "AT":    (47.6, 14.1),
+}
+
+# Farthest a sampling point may sit from its zone's centroid, in degrees.
+# Generous -- offshore sites are outside the landmass and zones are large --
+# but nowhere near wide enough to let another country through.
+MAX_SITE_DISTANCE_DEG = 6.0
 
 # Hourly variables pulled at each grid point. Wind power tracks the cube of
 # wind speed, so speed at hub height (100 m) is the load-bearing feature;

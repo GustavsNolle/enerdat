@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+import math
+
 import dagster as dg
 from dagster_duckdb import DuckDBResource
+
+from enerdat.config import (
+    GRID_POINTS,
+    MAX_SITE_DISTANCE_DEG,
+    ZONE,
+    ZONE_CENTROIDS,
+)
 
 
 @dg.asset_check(
@@ -369,5 +378,62 @@ def cost_measure_is_well_posed(duckdb: DuckDBResource) -> dg.AssetCheckResult:
             "tso_cost_eur": round(tso_cost or 0.0, 0),
             "zero_schedule_cost_eur": round(zero_cost or 0.0, 0),
             "perfect_foresight_cost_eur": 0.0,
+        },
+    )
+
+
+@dg.asset_check(
+    asset="openmeteo_archived_forecast",
+    blocking=True,
+    description=(
+        "Weather sampling points must lie inside the bidding zone they claim "
+        "to model. Nothing else in the pipeline relates the two."
+    ),
+)
+def grid_points_match_zone() -> dg.AssetCheckResult:
+    """Catches a config edit that changes the zone and forgets the sites.
+
+    That happened: after re-pointing from PL back to BE, ZONE and
+    TARGET_TECHNOLOGY were updated and GRID_POINTS were left as Polish
+    voivodeships, so a Belgian fleet was modelled on weather a thousand
+    kilometres away. Nothing failed and every other check passed, because the
+    intraday feature set leans on lagged outturn and the TSO forecast -- the
+    weather columns were simply noise, and noise does not raise.
+    """
+    centroid = ZONE_CENTROIDS.get(ZONE)
+    if centroid is None:
+        return dg.AssetCheckResult(
+            passed=True,
+            severity=dg.AssetCheckSeverity.WARN,
+            description=f"No centroid recorded for zone {ZONE}; cannot verify.",
+            metadata={"zone": ZONE},
+        )
+
+    distances = {
+        point["name"]: round(
+            math.dist((point["lat"], point["lon"]), centroid), 2
+        )
+        for point in GRID_POINTS
+    }
+    stray = {n: d for n, d in distances.items() if d > MAX_SITE_DISTANCE_DEG}
+
+    return dg.AssetCheckResult(
+        passed=not stray,
+        severity=dg.AssetCheckSeverity.ERROR,
+        description=(
+            f"All {len(GRID_POINTS)} sampling points sit within "
+            f"{MAX_SITE_DISTANCE_DEG}° of the {ZONE} centroid."
+            if not stray
+            else (
+                f"GRID_POINTS do not belong to {ZONE}: {stray} "
+                f"(limit {MAX_SITE_DISTANCE_DEG}°). The zone was changed "
+                "without changing the sites."
+            )
+        ),
+        metadata={
+            "zone": ZONE,
+            "sites": len(GRID_POINTS),
+            "max_distance_deg": max(distances.values()) if distances else 0,
+            "distances": dg.MetadataValue.json(distances),
         },
     )

@@ -44,6 +44,7 @@ defs = dg.Definitions(
         checks.forecast_actual_comparable,
         checks.imbalance_pricing_is_dual,
         checks.cost_measure_is_well_posed,
+        checks.grid_points_match_zone,
     ],
     jobs=[backfill_raw, build_mart],
     schedules=[
