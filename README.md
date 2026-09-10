@@ -253,8 +253,39 @@ candidate does shift long (45.5% of intervals against the TSO's 37.1%) and its
 signed bias falls from −37.6 MW to −6.6 MW — there is simply no asymmetry to
 exploit. The MAE gain that *did* appear is L1 versus L2, not the thesis.
 
-Worth testing in a dual-priced market with a genuine spread before concluding
-the idea is wrong; worth not claiming the edge exists until then.
+### Which market, and why BE was the wrong one
+
+`scripts/market_scan.py` answers this in one query per zone, and should be run
+*before* building anything. Measured Jun–Sep 2026:
+
+| zone | c_long | c_short | τ | asym | |
+| --- | --- | --- | --- | --- | --- |
+| BE | 19.75 | 22.99 | 0.462 | 1.16× | symmetric |
+| NL | 36.68 | 32.71 | 0.529 | 1.12× | symmetric |
+| FR | 28.64 | 34.91 | 0.451 | 1.22× | symmetric |
+| DK_1 | 31.43 | 32.70 | 0.490 | 1.04× | symmetric |
+| DK_2 | 29.23 | 31.22 | 0.484 | 1.07× | symmetric |
+| AT | 23.65 | 28.99 | 0.449 | 1.23× | symmetric |
+| ES | 29.75 | 21.10 | 0.585 | 1.41× | long punished |
+| **PL** | **115.90** | **439.78** | **0.209** | **3.79×** | **short punished** |
+
+Six of eight are symmetric, which is why the euro objective bought nothing here.
+BE was chosen on data-quality grounds — it was the only zone whose forecast and
+actual described the same fleet *and* published a bidding-zone imbalance price —
+and it happens to be the most symmetric market available. Right call for
+correctness, worst possible call for the thesis.
+
+**Poland is where the idea should be tested.** Over a full year it is stronger
+than the summer sample: c_long 54.38, c_short 397.35, **τ = 0.120, 7.31×**, and
+every one of thirteen months sits below τ 0.34 — structural, not seasonal.
+Being short costs €328–523/MWh in every single month. A τ of 0.120 means the
+cost-optimal schedule is the *12th percentile*: bid very low, be long ~88% of
+the time.
+
+It also passes the scope check that disqualified NL — Solar ratio 0.945 / corr
+0.989, Wind Onshore 0.923 / 0.946. Wind Onshore is the target at 2,625 MW mean,
+roughly five times the scale of BE offshore. (PL offshore fails at 0.735/0.769
+but is 89 MW; its first farms are only now commissioning.)
 
 ### Correcting the TSO's bias
 
