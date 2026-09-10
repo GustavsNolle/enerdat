@@ -1,12 +1,18 @@
 """The mart's two load-bearing behaviours: dedup of revisions, and no leakage."""
 
 import dagster as dg
+import numpy as np
 import pandas as pd
 import pytest
 from dagster_duckdb import DuckDBResource
 
 from enerdat.assets.marts import forecast_error_mart
-from enerdat.checks import leakage_free_features, market_day_length, unique_intervals
+from enerdat.checks import (
+    forecast_actual_comparable,
+    leakage_free_features,
+    market_day_length,
+    unique_intervals,
+)
 from enerdat.config import TARGET_TECHNOLOGY
 from enerdat.partitions import delivery_window, gate_closure
 from enerdat.resources import LakeResource
@@ -150,3 +156,54 @@ def test_leakage_check_catches_a_leak(tmp_path):
     evaluations = list(result.get_asset_check_evaluations())
     assert evaluations, "the leakage check did not run"
     assert not evaluations[0].passed, "leaking features were not detected"
+
+
+def _build_with_scale(tmp_path, actual_scale):
+    """forecast_error where actual is a fixed multiple of the forecast."""
+    lake = LakeResource(root=str(tmp_path / "raw"))
+    duckdb = DuckDBResource(database=str(tmp_path / "scale.duckdb"))
+    t0 = pd.Timestamp("2026-08-29T06:00:00Z")
+
+    # Both series must vary: correlation against a constant is undefined, and
+    # the check treats an undefined correlation as a failure.
+    shape = lambda i: 100.0 + np.sin(np.arange(len(i)) / 6) * 40
+    _write_entsoe(lake, "entsoe_day_ahead_forecast", shape, t0)
+    _write_entsoe(
+        lake, "entsoe_actual_generation",
+        lambda i: shape(i) * actual_scale + np.cos(np.arange(len(i))) * 3, t0,
+    )
+    _write_weather(lake, 2, t0)
+
+    resources = {"lake": lake, "duckdb": duckdb}
+    assert dg.materialize([forecast_error_mart], resources=resources).success
+    return resources
+
+
+def test_scope_check_passes_when_scales_agree(tmp_path):
+    resources = _build_with_scale(tmp_path, actual_scale=1.05)
+    result = dg.materialize(
+        [forecast_error_mart, forecast_actual_comparable],
+        resources=resources,
+        selection=dg.AssetSelection.checks_for_assets(forecast_error_mart),
+        raise_on_error=False,
+    )
+    evaluation = next(iter(result.get_asset_check_evaluations()))
+    assert evaluation.passed
+
+
+def test_scope_check_catches_the_nl_style_mismatch(tmp_path):
+    """NL metered offshore wind was 283% of the forecast. That must fail.
+
+    Without this check a scope mismatch becomes a fictional euro figure, and
+    nothing else in the pipeline would have noticed.
+    """
+    resources = _build_with_scale(tmp_path, actual_scale=2.83)
+    result = dg.materialize(
+        [forecast_error_mart, forecast_actual_comparable],
+        resources=resources,
+        selection=dg.AssetSelection.checks_for_assets(forecast_error_mart),
+        raise_on_error=False,
+    )
+    evaluation = next(iter(result.get_asset_check_evaluations()))
+    assert not evaluation.passed
+    assert "ratio" in str(evaluation.metadata).lower()

@@ -29,6 +29,14 @@ class EntsoeResource(dg.ConfigurableResource):
     # library lagged the change. Set ENTSOE_ENDPOINT_URL to repoint.
     endpoint_url: str = ""
 
+    # entsoe-py defaults to timeout=None, i.e. block forever. That is not
+    # theoretical: a year-range request to the Transparency Platform was
+    # observed sitting in CLOSE-WAIT with unread bytes for 18+ minutes after
+    # the server had hung up, and no retry wrapper can help because control
+    # never comes back. Generous enough for a legitimate multi-month range,
+    # finite either way.
+    request_timeout_seconds: int = 180
+
     def client(self):
         import entsoe.entsoe as entsoe_module
         from entsoe import EntsoePandasClient
@@ -38,7 +46,15 @@ class EntsoeResource(dg.ConfigurableResource):
             # takes effect for every call this client makes.
             entsoe_module.URL = self.endpoint_url
 
-        return EntsoePandasClient(api_key=self.api_key)
+        return EntsoePandasClient(
+            api_key=self.api_key,
+            timeout=self.request_timeout_seconds,
+            # Retries are handled in fetch(). Leaving entsoe-py's own default
+            # of 3 with a 10s delay would multiply out to a dozen attempts
+            # before a genuine failure ever surfaced.
+            retry_count=1,
+            retry_delay=0,
+        )
 
     def fetch(self, method: str, *args, **kwargs):
         """Call `method` on the client, retrying transient failures.
@@ -85,6 +101,37 @@ class EntsoeResource(dg.ConfigurableResource):
         raise RuntimeError(
             f"{method} failed after {self.max_attempts} attempts: {last}"
         ) from last
+
+
+    def fetch_range(self, method: str, *args, start, end, **kwargs):
+        """Like fetch(), but split into MAX_QUERY_DAYS chunks and concatenated.
+
+        Wide ranges are where this API misbehaves, so a backfill asks for
+        several bounded windows rather than one open-ended one. Chunks that
+        report no data are skipped rather than failing the range: a zone can
+        legitimately start publishing part-way through the window.
+        """
+        import pandas as pd
+
+        from enerdat.config import MAX_QUERY_DAYS
+
+        edges = list(pd.date_range(start, end, freq=f"{MAX_QUERY_DAYS}D"))
+        if not edges or edges[-1] < end:
+            edges.append(end)
+
+        pieces = []
+        for chunk_start, chunk_end in zip(edges, edges[1:]):
+            piece = self.fetch(method, *args, start=chunk_start, end=chunk_end, **kwargs)
+            if piece is not None and len(piece):
+                pieces.append(piece)
+
+        if not pieces:
+            return None
+
+        combined = pd.concat(pieces)
+        # Chunk boundaries are shared between adjacent windows, so the same
+        # timestamp can arrive twice; keep the later retrieval of each.
+        return combined[~combined.index.duplicated(keep="last")].sort_index()
 
 
 class OpenMeteoResource(dg.ConfigurableResource):

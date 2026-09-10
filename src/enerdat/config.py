@@ -12,10 +12,27 @@ import datetime as dt
 
 # --- scope -------------------------------------------------------------------
 
-# Bidding zone, as an entsoe-py alias. NL is the default rather than DE_LU
-# because Germany publishes no imbalance price at bidding-zone level, and the
-# imbalance price is what converts forecast error into euros.
-ZONE = "NL"
+# Bidding zone, as an entsoe-py alias.
+#
+# BE, chosen on evidence rather than preference. Two things have to hold at
+# once, and few zones manage both:
+#
+#   1. The zone must publish an imbalance price at bidding-zone level, since
+#      that is what converts MWh of error into euros. DE_LU does not.
+#   2. The 14.1.D forecast and the 16.1 metered actual must describe the same
+#      fleet. Measured over 1-7 Sep 2026, mean actual / mean forecast:
+#
+#          zone   solar   offshore   onshore
+#          BE      1.05      1.00      0.95     <- consistent
+#          DE_LU   1.04      0.90      1.00     (but no imbalance price)
+#          DK_1    1.11      1.20      1.19     (systematic +19% bias)
+#          NL      0.04      2.83      0.25     <- unusable
+#
+#      NL fails badly: Dutch distributed generation never reaches TenneT's
+#      metered aggregate, so subtracting forecast from actual measures scope,
+#      not error. `checks.forecast_actual_comparable` now fails the mart on
+#      exactly this, so the trap cannot be re-entered silently.
+ZONE = "BE"
 
 # The series we are trying to predict, as ENTSO-E names it.
 TARGET_TECHNOLOGY = "Wind Offshore"
@@ -25,6 +42,16 @@ TARGET_TECHNOLOGY = "Wind Offshore"
 MARKET_TZ = "Europe/Brussels"
 
 PARTITION_START = "2024-01-01"
+
+# Largest window sent to ENTSO-E in one request during a range backfill.
+#
+# entsoe-py chunks only at the year boundary, but the Transparency Platform
+# does not reliably serve a year of 14.1.D forecast: a 364-day request was
+# observed returning 133 KB and then going silent with the connection still
+# open, which a read timeout cannot distinguish from a slow stream. Sixty days
+# comes back in about a minute, and a failure costs one chunk instead of the
+# whole backfill.
+MAX_QUERY_DAYS = 60
 
 # --- the information boundary ------------------------------------------------
 
@@ -61,9 +88,15 @@ ACTUALS_PUBLICATION_LAG = dt.timedelta(hours=1)
 # monthly stays strictly causal and runs in reasonable time.
 MODEL_RETRAIN_DAYS = 30
 
-# Below this many training intervals the model abstains and emits NULL rather
+# Below this much training history the model abstains and emits NULL rather
 # than a prediction nobody should trust.
-MIN_TRAIN_INTERVALS = 2_000
+#
+# Counted in DAYS, not intervals, because market resolution is not a constant:
+# BE publishes the day-ahead forecast hourly (24 intervals/day) while NL
+# publishes quarter-hourly (96). An interval threshold silently means four
+# times as much history in one zone as the other -- and at 2000 intervals it
+# meant BE could never train at all.
+MIN_TRAIN_DAYS = 21
 
 # Whether the TSO's own day-ahead forecast may be used as a model feature.
 #
@@ -77,16 +110,19 @@ USE_TSO_FORECAST_AS_FEATURE = False
 
 # --- weather sampling --------------------------------------------------------
 
-# Dutch offshore wind sites. A handful of real locations beats a national
-# average, because offshore wind is spatially concentrated. Capacity weights
-# are approximate and should be replaced with values derived from
-# `query_installed_generation_capacity_per_unit`.
+# The Belgian offshore wind zone, grouped into five sampling points. Weights
+# are installed MW summed from query_installed_generation_capacity_per_unit,
+# which lists ten BE offshore units totalling 2260.8 MW.
+#
+# The whole fleet sits inside roughly 30 km of North Sea, so these points are
+# highly correlated -- that is a fact about Belgian offshore wind, not a
+# sampling flaw, and it is exactly why the zone's output swings as one block.
 GRID_POINTS = [
-    {"name": "Borssele",             "lat": 51.70, "lon": 3.05, "weight": 1.5},
-    {"name": "Hollandse Kust Zuid",  "lat": 52.30, "lon": 4.02, "weight": 1.5},
-    {"name": "Hollandse Kust Noord", "lat": 52.69, "lon": 4.24, "weight": 0.7},
-    {"name": "Luchterduinen",        "lat": 52.40, "lon": 4.18, "weight": 0.1},
-    {"name": "Gemini",               "lat": 54.04, "lon": 5.96, "weight": 0.6},
+    {"name": "Norther",              "lat": 51.53, "lon": 3.00, "weight": 370.0},
+    {"name": "Thorntonbank C-Power", "lat": 51.55, "lon": 2.93, "weight": 325.2},
+    {"name": "Rentel + Northwind",   "lat": 51.60, "lon": 2.92, "weight": 523.0},
+    {"name": "Seastar + Mermaid",    "lat": 51.65, "lon": 2.85, "weight": 487.5},
+    {"name": "Belwind + NW2",        "lat": 51.67, "lon": 2.80, "weight": 555.1},
 ]
 
 # Hourly variables pulled at each grid point. Wind power tracks the cube of

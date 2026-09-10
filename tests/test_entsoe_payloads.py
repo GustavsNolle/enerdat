@@ -16,7 +16,6 @@ from enerdat.assets.entsoe import _net_generation, _to_long
 
 FIXTURES = Path(__file__).parent / "fixtures"
 RETRIEVED_AT = pd.Timestamp("2026-09-08T06:00:00Z")
-PARTITION = "2026-09-01"
 
 
 def _load(name):
@@ -29,7 +28,7 @@ def _load(name):
 @pytest.mark.parametrize("name", ["wind_solar_forecast", "imbalance"])
 def test_flat_payloads_convert_to_long(name):
     frame = _load(name)
-    long = _to_long(frame, PARTITION, RETRIEVED_AT)
+    long = _to_long(frame, RETRIEVED_AT)
 
     assert set(long.columns) == {
         "valid_time_utc", "variable", "value", "zone", "delivery_date",
@@ -54,7 +53,7 @@ def test_multiindex_generation_flattens_to_net():
 
     # Pumped storage nets consumption against generation, so it can go negative;
     # a technology that only generates cannot.
-    long = _to_long(flat, PARTITION, RETRIEVED_AT)
+    long = _to_long(flat, RETRIEVED_AT)
     assert len(long) > 0
     assert str(long["valid_time_utc"].dt.tz) == "UTC"
 

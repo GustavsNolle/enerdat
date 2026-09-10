@@ -166,8 +166,27 @@ of a different length.
 
 ## Notes on the data
 
-- **Zone is NL, not DE_LU.** Germany publishes no imbalance price at bidding-zone
-  level, and the imbalance price is what converts MWh of error into euros.
+- **Zone is BE**, chosen on evidence. Two things must hold at once: the zone
+  publishes a bidding-zone imbalance price (DE_LU does not), *and* its 14.1.D
+  forecast describes the same fleet as its 16.1 metered actual. Measured mean
+  actual / mean forecast: BE 1.05/1.00/0.95 for solar/offshore/onshore, versus
+  NL's 0.04/2.83/0.25 — Dutch distributed generation never reaches TenneT's
+  aggregate, so subtracting one from the other there measures scope, not error.
+  `forecast_actual_comparable` now fails the mart on exactly that.
+- **Backfills use range requests, not one per day.** ENTSO-E serves an arbitrary
+  window in a single response, so the raw assets carry
+  `BackfillPolicy.single_run()`: 70 days is one request of about a minute rather
+  than 70 requests of twenty minutes. Requests are capped at `MAX_QUERY_DAYS`
+  because the platform does not reliably serve a full year — a 364-day request
+  returned 133 KB and then went silent with the connection still open.
+- **`entsoe-py` sets no request timeout by default**, so that silence blocks
+  forever; `EntsoeResource` sets one. Note it is a *read* timeout, not a
+  total-duration cap, which is why chunking rather than the timeout is the real
+  protection.
+- **Market resolution is not a constant.** BE publishes the day-ahead forecast
+  hourly, NL quarter-hourly. Any threshold expressed in intervals silently means
+  different amounts of history per zone, which is why `MIN_TRAIN_DAYS` counts
+  days.
 - **Market days have 23, 24 or 25 hours.** Delivery windows use calendar
   arithmetic, never `Timedelta(days=1)`. `market_day_length` asserts it.
 - **Day-ahead is 15-minute now**, weather is hourly. Features are held constant

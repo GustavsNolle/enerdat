@@ -154,3 +154,75 @@ def unique_intervals(duckdb: DuckDBResource) -> dg.AssetCheckResult:
         ),
         metadata={"rows": total, "distinct_intervals": distinct},
     )
+
+
+@dg.asset_check(
+    asset="forecast_error_mart",
+    blocking=True,
+    description=(
+        "Forecast and actual must describe the same fleet. TSOs vary in what "
+        "their metered actuals cover: where distributed generation is excluded "
+        "from article 16.1 but included in the 14.1.D forecast, subtracting one "
+        "from the other measures scope, not error."
+    ),
+)
+def forecast_actual_comparable(duckdb: DuckDBResource) -> dg.AssetCheckResult:
+    """Catches a scope mismatch before it becomes a fictional euro figure.
+
+    In NL this fires hard: metered solar is 3.6% of the forecast and metered
+    offshore wind is 283% of it, because Dutch distributed generation never
+    reaches TenneT's aggregate. The resulting "forecast error" would have been
+    almost entirely definitional.
+    """
+    with duckdb.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                count(*),
+                avg(tso_forecast_mw),
+                avg(actual_mw),
+                corr(tso_forecast_mw, actual_mw)
+            FROM forecast_error
+            WHERE actual_mw IS NOT NULL AND tso_forecast_mw IS NOT NULL
+            """
+        ).fetchone()
+
+    n, mean_forecast, mean_actual, correlation = row
+    if not n or not mean_forecast:
+        return dg.AssetCheckResult(
+            passed=False,
+            severity=dg.AssetCheckSeverity.ERROR,
+            description="No overlapping forecast/actual intervals to compare.",
+            metadata={"intervals": n or 0},
+        )
+
+    ratio = mean_actual / mean_forecast
+    # Bands are deliberately wide: a real forecast bias of +/-30% is plausible,
+    # a factor of three is a different definition.
+    ratio_ok = 0.7 <= ratio <= 1.4
+    corr_ok = correlation is not None and correlation >= 0.85
+    passed = ratio_ok and corr_ok
+
+    problems = []
+    if not ratio_ok:
+        problems.append(f"mean actual / mean forecast = {ratio:.3f}, outside 0.70-1.40")
+    if not corr_ok:
+        problems.append(f"correlation {correlation:.3f} below 0.85")
+
+    return dg.AssetCheckResult(
+        passed=passed,
+        severity=dg.AssetCheckSeverity.ERROR,
+        description=(
+            f"Forecast and actual are on the same scale (ratio {ratio:.3f}, "
+            f"corr {correlation:.3f})."
+            if passed
+            else "Scope mismatch: " + "; ".join(problems)
+        ),
+        metadata={
+            "intervals": n,
+            "mean_forecast_mw": round(mean_forecast, 1),
+            "mean_actual_mw": round(mean_actual, 1),
+            "ratio": round(ratio, 4),
+            "correlation": round(correlation, 4) if correlation is not None else -1,
+        },
+    )

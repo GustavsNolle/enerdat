@@ -39,7 +39,7 @@ def test_training_never_reaches_past_the_cutoff():
     """The audit trail is the proof, and this is the assertion that reads it."""
     frame = add_calendar_features(_history())
     features = feature_columns(list(frame.columns))
-    _, audit = walk_forward_predict(frame, features, retrain_days=7, min_train=500, lag=LAG)
+    _, audit = walk_forward_predict(frame, features, retrain_days=7, min_train_days=10, lag=LAG)
 
     trained = audit.dropna(subset=["max_train_valid_time_utc"])
     assert len(trained) > 0, "no day ever trained; fixture too small"
@@ -54,7 +54,7 @@ def test_training_never_reaches_past_the_cutoff():
 def test_cutoff_respects_the_publication_lag():
     frame = add_calendar_features(_history())
     features = feature_columns(list(frame.columns))
-    _, audit = walk_forward_predict(frame, features, retrain_days=7, min_train=500, lag=LAG)
+    _, audit = walk_forward_predict(frame, features, retrain_days=7, min_train_days=10, lag=LAG)
 
     for row in audit.itertuples():
         expected = pd.Timestamp(row.cutoff_utc) + LAG
@@ -68,7 +68,7 @@ def test_model_abstains_until_history_is_long_enough():
     frame = add_calendar_features(_history(days=20))
     features = feature_columns(list(frame.columns))
     predictions, audit = walk_forward_predict(
-        frame, features, retrain_days=7, min_train=500_000, lag=LAG
+        frame, features, retrain_days=7, min_train_days=10_000, lag=LAG
     )
     assert predictions.isna().all(), "abstention must mean NULL, not a guess"
     assert not audit["predicted"].any()
@@ -78,7 +78,7 @@ def test_first_days_have_no_prediction():
     frame = add_calendar_features(_history())
     features = feature_columns(list(frame.columns))
     predictions, audit = walk_forward_predict(
-        frame, features, retrain_days=7, min_train=2_000, lag=LAG
+        frame, features, retrain_days=7, min_train_days=21, lag=LAG
     )
     frame = frame.assign(pred=predictions)
 
@@ -95,7 +95,7 @@ def test_predictions_track_the_signal():
     frame = add_calendar_features(_history(days=120))
     features = feature_columns(list(frame.columns))
     predictions, _ = walk_forward_predict(
-        frame, features, retrain_days=30, min_train=2_000, lag=LAG
+        frame, features, retrain_days=30, min_train_days=21, lag=LAG
     )
     scored = frame.assign(pred=predictions).dropna(subset=["pred"])
     assert len(scored) > 0

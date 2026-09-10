@@ -41,6 +41,7 @@ defs = dg.Definitions(
         checks.leakage_free_features,
         checks.market_day_length,
         checks.unique_intervals,
+        checks.forecast_actual_comparable,
     ],
     jobs=[backfill_raw, build_mart],
     schedules=[

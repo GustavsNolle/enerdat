@@ -20,7 +20,7 @@ from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
     ACTUALS_PUBLICATION_LAG,
-    MIN_TRAIN_INTERVALS,
+    MIN_TRAIN_DAYS,
     MODEL_RETRAIN_DAYS,
     TARGET_TECHNOLOGY,
     USE_TSO_FORECAST_AS_FEATURE,
@@ -56,7 +56,7 @@ def walk_forward_predict(
     frame: pd.DataFrame,
     features: list[str],
     retrain_days: int = MODEL_RETRAIN_DAYS,
-    min_train: int = MIN_TRAIN_INTERVALS,
+    min_train_days: int = MIN_TRAIN_DAYS,
     lag: pd.Timedelta | None = None,
     seed: int = 0,
 ) -> tuple[pd.Series, pd.DataFrame]:
@@ -94,12 +94,14 @@ def walk_forward_predict(
             >= retrain_days
         )
 
-        if len(history) < min_train:
+        history_days = history["delivery_date"].nunique()
+        if history_days < min_train_days:
             audit.append(
                 {
                     "delivery_date": delivery_date,
                     "cutoff_utc": cutoff,
                     "n_train": len(history),
+                    "train_days": history_days,
                     "max_train_valid_time_utc": history["valid_time_utc"].max()
                     if len(history)
                     else pd.NaT,
@@ -125,6 +127,7 @@ def walk_forward_predict(
                 "delivery_date": delivery_date,
                 "cutoff_utc": cutoff,
                 "n_train": len(history),
+                "train_days": history_days,
                 "max_train_valid_time_utc": history["valid_time_utc"].max(),
                 "refit": bool(due),
                 "predicted": bool(len(usable)),
