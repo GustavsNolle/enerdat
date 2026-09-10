@@ -1,0 +1,9 @@
+# Evidence reads the marts DuckDB builds, so every figure on the site comes from
+# the same tables the asset checks run against -- nothing is retyped by hand.
+title: Enerdat
+
+plugins:
+  components:
+    "@evidence-dev/core-components": {}
+  datasources:
+    "@evidence-dev/duckdb": {}

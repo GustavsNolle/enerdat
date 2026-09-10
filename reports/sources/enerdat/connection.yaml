@@ -1,0 +1,9 @@
+name: enerdat
+type: duckdb
+options:
+  # Resolved relative to THIS directory (reports/sources/enerdat), not the
+  # project root, so three levels up reaches the repo root.
+  #
+  # Built by the Dagster pipeline. Rebuild before publishing:
+  #   dagster asset materialize --select "*" -m enerdat.definitions
+  filename: ../../../data/enerdat.duckdb

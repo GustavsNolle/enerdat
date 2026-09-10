@@ -24,3 +24,9 @@ wheels/
 
 # Data lake and warehouse (rebuildable from the API)
 data/
+
+# Evidence
+reports/node_modules/
+reports/build/
+reports/.evidence/
+reports/.svelte-kit/

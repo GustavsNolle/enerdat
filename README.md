@@ -113,6 +113,30 @@ Backfills run through the `backfill_raw` job, which caps concurrency at 4 —
 ENTSO-E allows 400 requests/minute and throttles hard above it, and a two-year
 backfill across three datasets is several thousand calls.
 
+## Dashboard
+
+`reports/` is an Evidence project that reads the DuckDB marts directly, so every
+figure on the site is computed by SQL against the same tables the asset checks
+run on — nothing is retyped by hand.
+
+```bash
+dagster asset materialize --select "*" -m enerdat.definitions   # refresh the marts
+cd reports && npm install
+npx evidence sources     # extract the marts to parquet
+npx evidence dev         # localhost:3000
+npx evidence build       # static site in reports/build
+```
+
+`reports/build` is a plain static site — host it anywhere (Netlify, Cloudflare
+Pages, GitHub Pages, S3) or use Evidence Studio. The DuckDB path in
+`sources/enerdat/connection.yaml` resolves relative to that file, not the project
+root.
+
+The page leads with the result, then the cost decomposition that explains it, then
+the checks that guard it — including what `cost_measure_is_well_posed` caught in
+Poland and what `forecast_actual_comparable` caught in the Netherlands. The two
+caveats that weaken the headline are on the page, not in a footnote.
+
 ## Layout
 
 ```
