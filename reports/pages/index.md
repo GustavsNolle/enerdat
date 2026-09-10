@@ -1,122 +1,146 @@
 ---
 title: Imbalance Ledger
-description: A year of Belgian offshore wind imbalance settlement
+description: Settlement cost of Belgian offshore wind schedules
 ---
 
 ```sql cover
 select * from enerdat.coverage
 ```
 
-A schedule that forecasts **less accurately** settles **cheaper**. Imbalance cost
-is almost entirely covariance — whether errors land on expensive intervals — not
-error size, so optimising accuracy optimises the wrong thing.
+<DateRange
+  name=range
+  title="Delivery period"
+  start={cover[0].first_day}
+  end={cover[0].last_day}
+/>
 
-Belgian offshore wind, <Value data={cover} column=days/> delivery days to
-<Value data={cover} column=last_day/>, <Value data={cover} column=intervals fmt='#,##0'/>
-scored intervals. Schedule fixed one hour before delivery.
+<ButtonGroup name=grain title="Compare against" defaultValue="tso">
+  <ButtonGroupItem valueLabel="TSO forecast" value="tso" default/>
+  <ButtonGroupItem valueLabel="Persistence" value="pers"/>
+</ButtonGroup>
 
-## The result
-
-```sql schedules
-select * from enerdat.schedules
-```
-
-```sql headline
+```sql filtered
 select
-  round(max(case when schedule = 'TSO forecast' then cost_eur_m end)
-      - max(case when schedule = 'Model' then cost_eur_m end), 2) as vs_tso,
-  round(max(case when schedule = 'Persistence (T-2h)' then cost_eur_m end)
-      - max(case when schedule = 'Model' then cost_eur_m end), 2) as vs_persistence,
-  round(max(case when schedule = 'Model' then mae_mw end)
-      - max(case when schedule = 'Persistence (T-2h)' then mae_mw end), 1) as mae_gap
-from enerdat.schedules
+    *,
+    (actual_mw - tso_forecast_mw) * interval_hours * spread_eur_mwh as tso_cost,
+    (actual_mw - persistence_mw)  * interval_hours * spread_eur_mwh as pers_cost,
+    (actual_mw - candidate_mw)    * interval_hours * spread_eur_mwh as model_cost,
+    '${inputs.grain}'                                               as baseline_key
+from enerdat.settlement
+where persistence_mw is not null
+  and delivery_date between '${inputs.range.start}' and '${inputs.range.end}'
 ```
 
-<BigValue data={headline} value=vs_tso title="Saved vs TSO forecast (€m/yr)" fmt='0.00'/>
-<BigValue data={headline} value=vs_persistence title="Saved vs persistence (€m/yr)" fmt='0.00'/>
-<BigValue data={headline} value=mae_gap title="MAE vs persistence (MW)" fmt='+0.0'/>
+```sql kpi
+select
+    round(sum(case when baseline_key = 'tso' then tso_cost else pers_cost end)
+        - sum(model_cost), 0)                                       as saved_eur,
+    round(sum(model_cost), 0)                                       as model_cost_eur,
+    round(avg(abs(actual_mw - candidate_mw)), 1)                    as model_mae,
+    round(avg(abs(actual_mw - case when baseline_key = 'tso'
+                then tso_forecast_mw else persistence_mw end)), 1)  as base_mae,
+    round(avg(actual_mw - candidate_mw), 1)                         as model_bias,
+    count(*)                                                        as intervals
+from ${filtered}
+```
 
-Cost is the opportunity cost of deviating: `(actual − scheduled) × hours ×
-(P_dayahead − P_imbalance)`. Perfect foresight is zero by construction and nothing
-may beat it — a blocking asset check enforces exactly that, and it is what caught
-a €1bn artefact in Poland.
+<Grid cols=4>
+  <BigValue data={kpi} value=saved_eur title="Saved vs baseline" fmt='€#,##0' 
+    comparison=model_bias comparisonTitle="model bias MW" comparisonFmt='+#,##0.0'/>
+  <BigValue data={kpi} value=model_cost_eur title="Model settlement cost" fmt='€#,##0'/>
+  <BigValue data={kpi} value=model_mae title="Model MAE (MW)" fmt='#,##0.0'
+    comparison=base_mae comparisonTitle="baseline MAE" comparisonFmt='#,##0.0'/>
+  <BigValue data={kpi} value=intervals title="Intervals in range" fmt='#,##0'/>
+</Grid>
 
-<DataTable data={schedules} rows=4>
-  <Column id=schedule title="Schedule"/>
-  <Column id=mae_mw title="MAE (MW)" fmt='#,##0.0'/>
-  <Column id=bias_mw title="Bias (MW)" fmt='+#,##0.0'/>
-  <Column id=cost_eur_m title="Cost (€m/yr)" fmt='#,##0.00'/>
-  <Column id=bias_term_eur_m title="of which bias" fmt='#,##0.00'/>
+<Alert status=info>
+The model is usually <strong>less accurate</strong> than the baseline and still settles
+cheaper. Cost is driven by whether errors land on expensive intervals, not by their size.
+</Alert>
+
+## Cost over time
+
+```sql daily
+select
+    delivery_date,
+    round(sum(case when baseline_key = 'tso' then tso_cost else pers_cost end) / 1e3, 1) as baseline_k,
+    round(sum(model_cost) / 1e3, 1)                                                           as model_k,
+    round(sum(sum(case when baseline_key = 'tso' then tso_cost else pers_cost end)
+            - sum(model_cost)) over (order by delivery_date) / 1e6, 3)                        as cumulative_saved_m
+from ${filtered}
+group by delivery_date
+order by delivery_date
+```
+
+<Grid cols=2>
+  <LineChart data={daily} x=delivery_date y=cumulative_saved_m
+    title="Cumulative saving (€m)" yAxisTitle="€m" />
+  <LineChart data={daily} x=delivery_date y={["baseline_k","model_k"]}
+    title="Daily cost (€k)" yAxisTitle="€k" />
+</Grid>
+
+## Where the cost concentrates
+
+```sql by_hour
+select
+    hour_utc,
+    round(sum(model_cost) / 1e3, 1)     as model_k,
+    round(avg(spread_eur_mwh), 1)       as mean_spread,
+    round(avg(abs(actual_mw - candidate_mw)), 0) as mae
+from ${filtered} group by hour_utc order by hour_utc
+```
+
+```sql by_month
+select
+    month,
+    round(sum(case when baseline_key = 'tso' then tso_cost else pers_cost end) / 1e3, 0) as baseline_k,
+    round(sum(model_cost) / 1e3, 0)                                                          as model_k
+from ${filtered} group by month order by month
+```
+
+<Grid cols=2>
+  <BarChart data={by_month} x=month y={["baseline_k","model_k"]} type=grouped
+    title="Cost by month (€k)" yAxisTitle="€k"/>
+  <BarChart data={by_hour} x=hour_utc y=model_k
+    title="Model cost by hour of day (€k)" yAxisTitle="€k" xAxisTitle="hour UTC"/>
+</Grid>
+
+## Most expensive intervals
+
+The twenty intervals that cost the model most. Sort or filter to find what they
+have in common — they are overwhelmingly high-spread hours, not high-error ones.
+
+```sql worst
+select
+    valid_time_utc,
+    round(actual_mw, 0)                        as actual_mw,
+    round(candidate_mw, 0)                     as model_mw,
+    round(actual_mw - candidate_mw, 0)         as error_mw,
+    round(spread_eur_mwh, 1)                   as spread,
+    round(model_cost, 0)                       as cost_eur
+from ${filtered} order by model_cost desc limit 20
+```
+
+<DataTable data={worst} rows=10 search=true>
+  <Column id=valid_time_utc title="Interval"/>
+  <Column id=actual_mw title="Actual" fmt='#,##0'/>
+  <Column id=model_mw title="Scheduled" fmt='#,##0'/>
+  <Column id=error_mw title="Error" fmt='+#,##0'/>
+  <Column id=spread title="Spread €/MWh" fmt='#,##0.0'/>
+  <Column id=cost_eur title="Cost €" fmt='€#,##0'/>
 </DataTable>
 
-The **bias column is the argument**. Belgium's mean spread is
-<Value data={cover} column=mean_spread_eur_mwh fmt='€0.00'/>/MWh, so even the TSO's
-37 MW standing bias is worth about €0.2m against a €26m bill. Everything else is
-covariance — which neither squared error nor a quantile objective targets.
+<Details title="Provenance and caveats">
 
-## Cumulative saving against the TSO forecast
+Belgian offshore wind, <Value data={cover} column=days/> delivery days,
+<Value data={cover} column=intervals fmt='#,##0'/> settled intervals. Schedule fixed
+one hour before delivery; mean day-ahead-to-imbalance spread
+<Value data={cover} column=mean_spread_eur_mwh fmt='€0.00'/>/MWh.
 
-```sql cumulative
-select * from enerdat.cumulative
-```
+Every figure is computed by SQL against the DuckDB marts the pipeline builds — the
+same tables seven asset checks run against. **The honest baseline is persistence,
+not the TSO**: no BRP schedules Belgian wind by copying the published forecast.
+Against persistence the margin is roughly €0.16/MWh, which intraday spread and market
+impact would erode. Full method, checks and caveats on the [Method](/method) page.
 
-<LineChart data={cumulative} x=day y=cumulative_eur_m yAxisTitle="€m cumulative" 
-  title="Running total of avoided settlement cost"/>
-
-The line is not monotonic. The model loses in stretches, and those stretches are
-left in rather than smoothed away.
-
-## Monthly settlement cost
-
-```sql monthly
-select * from enerdat.monthly
-```
-
-<BarChart data={monthly} x=month y=cost_eur_k series=schedule type=grouped
-  yAxisTitle="€k per month" title="Cost by schedule and month"/>
-
-The model beats the TSO in most months and loses in two. Negative bars are months
-where a schedule earned rather than cost.
-
-## What guards these numbers
-
-```sql zero
-select zero_schedule_cost_eur_m from enerdat.coverage
-```
-
-Seven asset checks run on every materialisation. Two have already killed results
-that looked good:
-
-- **`cost_measure_is_well_posed`** — no schedule may cost less than perfect
-  foresight. Fired on Poland, where bidding zero "saved" €5,085m against perfect
-  foresight's €198m. Here a zero schedule costs
-  <Value data={zero} column=zero_schedule_cost_eur_m fmt='€0.00'/>m, more than every
-  real schedule, so the ranking is not an artefact of being systematically long.
-- **`forecast_actual_comparable`** — fired on the Netherlands, where metered solar
-  is 3.6% of the forecast and offshore wind 283%. Subtracting one from the other
-  measures scope, not error.
-- **`leakage_free_features`** — every weather feature carries the issue time of the
-  run it came from, and all predate the decision deadline. Lagged outturn is bounded
-  by `DECISION_LEAD + ACTUALS_PUBLICATION_LAG` = 2h.
-- **`market_day_length`** — all 364 delivery days span 23, 24 or 25 hours. Verified
-  on real DST days: 2025-10-26 has 25, 2026-03-29 has 23.
-- **`imbalance_pricing_is_dual`** — reports that Belgium settles both directions at
-  one price, so the cost-optimal quantile objective is degenerate here and falls
-  back to megawatts. ENTSO-E labels the columns `Long`/`Short` regardless; they are
-  byte-identical.
-
-## What to distrust
-
-**The honest baseline is persistence, not the TSO.** No BRP schedules Belgian wind
-by copying the TSO's published forecast, so the headline overstates the real
-opportunity. Against persistence — one line of SQL — the margin is
-<Value data={headline} column=vs_persistence fmt='€0.00'/>m/yr, roughly €0.16/MWh,
-which intraday spread and market impact would erode.
-
-**One lag has zero headroom.** The two-hour outturn lag is published exactly at the
-decision deadline. Legal under `≤`, but a minute of publication slippage would leak.
-Widening `ACTUAL_LAG_HOURS` to start at 3h buys margin at some cost in skill.
-
-**Weather is day-granular.** Open-Meteo's archive means the freshest legal run is the
-same at intraday as at day-ahead. The intraday gain is recent outturn, not better
-weather.
+</Details>
