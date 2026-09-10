@@ -104,10 +104,14 @@ def test_predictions_track_the_signal():
     assert corr > 0.8, f"causal model should still track the target (r={corr:.2f})"
 
 
-def test_tso_forecast_is_not_a_feature_by_default():
-    """Article 14.1.D lands at 18:00 D-1, after the 12:00 gate closure."""
+def test_tso_forecast_admission_follows_the_configured_deadline():
+    """Admissible only because the deadline is at or after 18:00 on D-1, when
+    article 14.1.D requires the forecast to be public."""
+    from enerdat.config import USE_TSO_FORECAST_AS_FEATURE
+
     frame = add_calendar_features(_history(days=5))
-    assert "tso_forecast_mw" not in feature_columns(list(frame.columns))
+    selected = feature_columns(list(frame.columns))
+    assert ("tso_forecast_mw" in selected) is USE_TSO_FORECAST_AS_FEATURE
 
 
 def test_training_window_actually_bounds_the_history():

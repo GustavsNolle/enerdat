@@ -10,9 +10,9 @@ from dagster_duckdb import DuckDBResource
     asset="forecast_error_mart",
     blocking=True,
     description=(
-        "Proves no feature post-dates gate closure. Every weather column "
-        "carries the issue time of the model run it came from; each must be "
-        "at or before 12:00 market time on D-1."
+        "Proves no feature post-dates the decision deadline. Every weather "
+        "column carries the issue time of the model run it came from; each must "
+        "be at or before DECISION_TIME_LOCAL on D-1."
     ),
 )
 def leakage_free_features(duckdb: DuckDBResource) -> dg.AssetCheckResult:
@@ -65,7 +65,7 @@ def leakage_free_features(duckdb: DuckDBResource) -> dg.AssetCheckResult:
         passed=passed,
         severity=dg.AssetCheckSeverity.ERROR,
         description=(
-            "Every feature predates gate closure."
+            "Every feature predates the decision deadline."
             if passed
             else f"Leaking columns: {violations}"
         ),

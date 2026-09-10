@@ -37,7 +37,23 @@ from enerdat.config import (
 )
 
 
+# What imbalance_settlement_mart reads off this table. Kept regardless of
+# whether a column also happens to be a feature.
+SETTLEMENT_COLUMNS = (
+    "valid_time_utc",
+    "delivery_date",
+    "actual_mw",
+    "tso_forecast_mw",
+    "price_day_ahead",
+    "price_long",
+    "price_short",
+)
+
 LAGGED = ("wind_speed_100m_v", "power_fraction")
+
+# The TSO forecast gets lagged too when it is admissible: its error is
+# autocorrelated, so the neighbouring hours say something about this one.
+TSO_LAGGED = ("tso_forecast_mw",)
 
 
 def power_fraction(speed_ms):
@@ -83,7 +99,8 @@ def add_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
     entirely and is not done.
     """
     out = frame.sort_values("valid_time_utc").copy()
-    for column in LAGGED:
+    lagged = LAGGED + (TSO_LAGGED if USE_TSO_FORECAST_AS_FEATURE else ())
+    for column in lagged:
         if column not in out.columns:
             continue
         for step in WEATHER_LAG_STEPS:
@@ -111,13 +128,17 @@ def feature_columns(available: list[str]) -> list[str]:
     columns += [f"pf_site_{i}" for i in range(len(GRID_POINTS))]
     columns += ["ws_site_sd", "power_fraction"]
 
-    for base in LAGGED:
+    bases = LAGGED + (TSO_LAGGED if USE_TSO_FORECAST_AS_FEATURE else ())
+    for base in bases:
         columns += [f"{base}_t{step:+d}" for step in WEATHER_LAG_STEPS]
         columns += [f"{base}_roll3", f"{base}_delta"]
 
     columns += ["hour_sin", "hour_cos", "month"]
 
     if USE_TSO_FORECAST_AS_FEATURE:
+        # Admissible only because DECISION_TIME_LOCAL is at or after the
+        # article 14.1.D publication hour. With an earlier deadline this
+        # forecast does not exist yet and must stay out.
         columns.append("tso_forecast_mw")
 
     return [c for c in columns if c in available]
@@ -324,8 +345,12 @@ def candidate_forecast(
     mae_candidate = float((scored.candidate_mw - scored.actual_mw).abs().mean()) if len(scored) else float("nan")
     mae_tso = float((scored.tso_forecast_mw - scored.actual_mw).abs().mean()) if len(scored) else float("nan")
 
-    derived = set(features) | {"hour_sin", "hour_cos", "month"}
-    keep = [c for c in frame.columns if not c.endswith("_issued") and c not in derived]
+    # Allow-list, for the same reason feature selection is one. The previous
+    # rule dropped "anything that is a feature", which silently removed
+    # tso_forecast_mw from this table the moment it became admissible -- and
+    # settlement needs it. Name what downstream requires instead of guessing
+    # what it does not.
+    keep = [c for c in SETTLEMENT_COLUMNS if c in frame.columns] + ["candidate_mw"]
     with duckdb.get_connection() as connection:
         connection.register("candidate_df", frame[keep])
         connection.execute(

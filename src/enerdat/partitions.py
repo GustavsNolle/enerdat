@@ -8,7 +8,7 @@ from __future__ import annotations
 import dagster as dg
 import pandas as pd
 
-from enerdat.config import GATE_CLOSURE_LOCAL, MARKET_TZ, PARTITION_START
+from enerdat.config import DECISION_TIME_LOCAL, MARKET_TZ, PARTITION_START
 
 daily_partitions = dg.DailyPartitionsDefinition(
     start_date=PARTITION_START,
@@ -31,15 +31,16 @@ def delivery_window(partition_key: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     return start, end
 
 
-def gate_closure(partition_key: str) -> pd.Timestamp:
+def decision_deadline(partition_key: str) -> pd.Timestamp:
     """The instant the information set for delivery day D is frozen.
 
-    12:00 market time on D-1, returned in UTC.
+    DECISION_TIME_LOCAL on D-1, returned in UTC. Nothing published after this
+    may inform the schedule for D.
     """
     start, _ = delivery_window(partition_key)
     previous_day = (start - pd.DateOffset(days=1)).date()
     local = pd.Timestamp(
-        dt_combine(previous_day, GATE_CLOSURE_LOCAL), tz=MARKET_TZ
+        dt_combine(previous_day, DECISION_TIME_LOCAL), tz=MARKET_TZ
     )
     return local.tz_convert("UTC")
 
@@ -48,3 +49,8 @@ def dt_combine(date, time):
     import datetime as _dt
 
     return _dt.datetime.combine(date, time)
+
+
+# Kept so older call sites and tests keep working; the deadline is the same
+# object, only its name changed when it stopped being the auction's.
+gate_closure = decision_deadline

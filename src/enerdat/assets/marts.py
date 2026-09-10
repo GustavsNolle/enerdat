@@ -7,6 +7,7 @@ from dagster import AssetExecutionContext
 from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
+    DECISION_TIME_LOCAL,
     GRID_POINTS,
     TARGET_TECHNOLOGY,
     WEATHER_LEAD_DAYS,
@@ -14,6 +15,10 @@ from enerdat.config import (
     ZONE,
 )
 from enerdat.resources import LakeResource
+
+# Hour of DECISION_TIME_LOCAL, so the SQL deadline follows the config rather
+# than a literal that drifts out of step with it.
+_DECISION_HOUR = DECISION_TIME_LOCAL.hour
 
 # Weather is summarised three ways, because averaging alone destroys the two
 # things that matter most.
@@ -143,11 +148,11 @@ issued AS (
 SELECT
     f.valid_time_utc,
     timezone('Europe/Brussels', f.valid_time_utc)::DATE      AS delivery_date,
-    -- gate closure: 12:00 market time on D-1, expressed back in UTC
+    -- the decision deadline for this delivery day, back in UTC
     timezone(
         'Europe/Brussels',
         (timezone('Europe/Brussels', f.valid_time_utc)::DATE
-         - INTERVAL 1 DAY) + INTERVAL 12 HOUR
+         - INTERVAL 1 DAY) + INTERVAL {_DECISION_HOUR} HOUR
     )                                                        AS gate_closure_utc,
     f.tso_forecast_mw,
     a.actual_mw,

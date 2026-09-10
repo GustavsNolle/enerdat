@@ -3,7 +3,8 @@
 import pandas as pd
 import pytest
 
-from enerdat.partitions import delivery_window, gate_closure
+from enerdat.config import DECISION_TIME_LOCAL, MARKET_TZ
+from enerdat.partitions import decision_deadline, delivery_window
 
 # EU DST transitions in 2026: last Sunday of March / October.
 SPRING_FORWARD = "2026-03-29"  # 23-hour day
@@ -37,19 +38,27 @@ def test_delivery_window_covers_whole_local_day():
 
 
 @pytest.mark.parametrize(
-    "partition_key,expected_utc",
+    "partition_key,utc_offset_hours",
     [
-        # CEST (UTC+2): 12:00 local on D-1 is 10:00 UTC
-        ("2026-08-28", "2026-08-27 10:00:00+00:00"),
-        # CET (UTC+1): 12:00 local on D-1 is 11:00 UTC
-        ("2026-01-15", "2026-01-14 11:00:00+00:00"),
+        ("2026-08-28", 2),  # CEST
+        ("2026-01-15", 1),  # CET
     ],
 )
-def test_gate_closure_tracks_the_utc_offset(partition_key, expected_utc):
-    assert str(gate_closure(partition_key)) == expected_utc
+def test_decision_deadline_tracks_the_utc_offset(partition_key, utc_offset_hours):
+    """Derived from the configured local hour, so changing it cannot leave a
+    stale literal behind -- and the UTC answer must move with DST."""
+    expected = (
+        pd.Timestamp(partition_key, tz=MARKET_TZ)
+        - pd.DateOffset(days=1)
+        + pd.Timedelta(hours=DECISION_TIME_LOCAL.hour)
+    ).tz_convert("UTC")
+    assert decision_deadline(partition_key) == expected
+    assert decision_deadline(partition_key).hour == (
+        DECISION_TIME_LOCAL.hour - utc_offset_hours
+    )
 
 
-def test_gate_closure_precedes_delivery():
+def test_decision_deadline_precedes_delivery():
     for key in ["2026-08-28", SPRING_FORWARD, FALL_BACK, "2026-01-15"]:
         start, _ = delivery_window(key)
-        assert gate_closure(key) < start.tz_convert("UTC")
+        assert decision_deadline(key) < start.tz_convert("UTC")

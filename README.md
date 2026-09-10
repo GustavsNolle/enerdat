@@ -14,7 +14,17 @@ DuckDB for the warehouse, an append-only Parquet lake in between.
 ## The one rule everything else serves
 
 To honestly claim you beat a day-ahead forecast, every feature must contain only
-what was knowable at **gate closure — 12:00 market time on D−1**.
+what was knowable at the **decision deadline — `DECISION_TIME_LOCAL`, 18:00
+market time on D−1**.
+
+That is deliberately *not* the 12:00 day-ahead auction gate closure, for two
+reasons. Imbalance is settled against a BRP's final nominated position, not its
+day-ahead position, and intraday markets stay open long past noon — treating the
+auction as the last decision models a party that stops trading at midday and
+watches its exposure accumulate. And article 14.1.D obliges TSOs to publish the
+day-ahead wind forecast by 18:00 on D−1, so at that hour it is public
+information available to every participant. The question becomes the one a BRP
+actually faces: *given the published forecast, can you schedule better than it?*
 
 The obvious way to get historical weather violates this. Reanalysis products
 (ERA5, and Open-Meteo's `archive-api`) are reconstructed *using the observations
@@ -246,8 +256,27 @@ exploit. The MAE gain that *did* appear is L1 versus L2, not the thesis.
 Worth testing in a dual-priced market with a genuine spread before concluding
 the idea is wrong; worth not claiming the edge exists until then.
 
-The TSO's own bias is the more interesting find: it over-forecasts BE offshore
-wind by **37.6 MW on average**, and is short 63% of intervals.
+### Correcting the TSO's bias
+
+The TSO over-forecasts BE offshore wind by **37.6 MW on average** and is short
+63% of intervals. Admitting its forecast as a feature — legal at the 18:00
+deadline — makes the model a *correction* rather than an independent forecast:
+
+| | MAE MW | bias MW | long % | cost €m/yr |
+| --- | --- | --- | --- | --- |
+| TSO forecast | 164.6 | −37.6 | 37.1 | 19.63 |
+| candidate | 166.5 | **−8.0** | 44.8 | 20.89 |
+| ratio | 1.012 | | | 1.064 |
+
+**79% of the bias is removed** (37.6 → 8.0 MW) and MAE reaches parity (1.012,
+from 1.134). The euro loss halves, −€2.45m to −€1.26m. It still loses.
+
+The honest reading is the uncomfortable one: the candidate now has **strictly
+more information than the TSO forecast did** — that forecast plus weather runs
+issued up to 18:00 on D−1 — and still does not beat it on cost. Removing a large
+standing bias bought MAE parity and no euro advantage, which says the bias was
+sitting in a direction that happened to be cheap. The TSO's remaining edge is
+its telemetry, and it is not recoverable from public data.
 
 The settlement period is derived from the data rather than assumed, because the
 market moved to quarter-hourly MTU mid-history and DST days contain an interval

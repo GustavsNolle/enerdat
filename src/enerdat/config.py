@@ -55,10 +55,39 @@ MAX_QUERY_DAYS = 60
 
 # --- the information boundary ------------------------------------------------
 
-# Day-ahead auction gate closure: 12:00 market time on D-1. A schedule for
-# delivery day D must be submitted by then, so nothing published after this
-# instant may be used as a feature for day D.
+# Day-ahead auction gate closure: 12:00 market time on D-1. Recorded because it
+# is a real market boundary, but it is NOT the deadline this project schedules
+# against -- see DECISION_TIME_LOCAL.
 GATE_CLOSURE_LOCAL = dt.time(12, 0)
+
+# When our schedule is fixed, in market time on D-1. Everything downstream --
+# which weather runs are legal, whether the TSO forecast may be a feature, and
+# what the leakage check enforces -- keys off this one value.
+#
+# 18:00, which is a deliberate change from the 12:00 auction gate closure this
+# project originally used, for two reasons.
+#
+# First, imbalance is settled against a BRP's FINAL nominated position, not its
+# day-ahead position. Intraday markets stay open long past 12:00, so treating
+# the day-ahead auction as the last decision point models a party that stops
+# trading at noon and then watches its exposure accumulate. Nobody does that.
+#
+# Second, article 14.1.D obliges TSOs to publish the day-ahead wind and solar
+# forecast by 18:00 on D-1. At 12:00 it does not exist yet, which is why it was
+# excluded as a feature; at 18:00 it is public. Since that forecast is both the
+# baseline and, measurably, biased -- it over-forecasts BE offshore wind by
+# 37.6 MW on average and is short 63% of intervals -- correcting it is the
+# single largest effect available.
+#
+# The comparison stays honest: the TSO forecast is public information at this
+# hour, available to every market participant, and the question becomes the one
+# a BRP actually faces -- given the published forecast, can you schedule better
+# than it?
+#
+# NOTE this is an assumption about publication timing taken from the
+# regulation, not something the data can confirm. If a TSO published late, this
+# would be optimistic.
+DECISION_TIME_LOCAL = dt.time(18, 0)
 
 # Which archived weather runs to fetch, as Open-Meteo `previous_dayN` offsets.
 #
@@ -136,13 +165,15 @@ MIN_TRAIN_DAYS = 90
 
 # Whether the TSO's own day-ahead forecast may be used as a model feature.
 #
-# False, deliberately. Article 14.1.D forecasts are published by 18:00 on D-1,
-# which is AFTER the 12:00 day-ahead gate closure this project treats as the
-# decision point. Using it would mean predicting with information the schedule
-# could not have contained. The cost is real -- the TSO forecast is a strong
-# feature and we are beating it with strictly less information than it had --
-# but a win under this rule is unambiguous, and a loss is explicable.
-USE_TSO_FORECAST_AS_FEATURE = False
+# True, and legal precisely because DECISION_TIME_LOCAL is 18:00: article
+# 14.1.D requires publication by that hour, so the forecast is public before
+# the schedule is fixed. Under the old 12:00 deadline it was not, and this was
+# False.
+#
+# This makes the model a correction to the published forecast rather than an
+# independent one, which is the point: the TSO's accuracy comes from telemetry
+# we do not have, while its bias is visible in the public record.
+USE_TSO_FORECAST_AS_FEATURE = True
 
 # What the model minimises.
 #

@@ -12,6 +12,7 @@ from enerdat.assets.model import (
     power_fraction,
 )
 from enerdat.config import (
+    USE_TSO_FORECAST_AS_FEATURE,
     TURBINE_CUT_IN_MS,
     TURBINE_CUT_OUT_MS,
     TURBINE_RATED_MS,
@@ -105,9 +106,11 @@ def test_feature_list_is_an_allow_list_not_a_blocklist():
         "tso_forecast_mw", "savings_eur", "delivery_date",
     ]
     selected = feature_columns(available)
+    # Never admissible: the outturn itself, and prices that are unknown for the
+    # delivery day at the moment the schedule is fixed.
     for forbidden in (
         "actual_mw", "price_day_ahead", "price_long", "price_short",
-        "tso_forecast_mw", "savings_eur", "delivery_date",
+        "savings_eur", "delivery_date",
     ):
         assert forbidden not in selected, f"{forbidden} must never be a feature"
     assert "wind_speed_100m_v" in selected
@@ -118,3 +121,15 @@ def test_model_spread_is_offered_as_a_feature():
     """Cross-model disagreement is what the quantile objective needs."""
     selected = feature_columns(["wind_speed_100m_v", "wind_speed_100m_model_sd"])
     assert "wind_speed_100m_model_sd" in selected
+
+
+def test_tso_forecast_is_admitted_only_when_the_deadline_allows_it():
+    """Article 14.1.D publishes at 18:00 on D-1.
+
+    With DECISION_TIME_LOCAL at or after that hour the forecast is public
+    before the schedule is fixed and may be corrected; with an earlier deadline
+    it does not exist yet. The flag encodes that, and the feature list must
+    follow it rather than deciding on its own.
+    """
+    selected = feature_columns(["tso_forecast_mw", "wind_speed_100m_v"])
+    assert ("tso_forecast_mw" in selected) is USE_TSO_FORECAST_AS_FEATURE

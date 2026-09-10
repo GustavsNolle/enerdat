@@ -11,7 +11,7 @@ from enerdat.config import (
     WEATHER_LEAD_DAYS_OPTIONS,
     WEATHER_VARIABLES,
 )
-from enerdat.partitions import daily_partitions, delivery_window, gate_closure
+from enerdat.partitions import daily_partitions, decision_deadline, delivery_window
 from enerdat.resources import LakeResource, OpenMeteoResource
 
 
@@ -78,14 +78,13 @@ def openmeteo_archived_forecast(
     )
     combined["retrieved_at_utc"] = retrieved_at
 
-    # Gate closure is per delivery day, so the legality of a given lead varies
-    # across the day: a 1-day lead is fine for a morning hour and too late for
-    # an evening one.
-    closures = {key: gate_closure(key) for key in keys}
+    # The deadline is per delivery day, so the legality of a given lead varies
+    # across the day.
+    closures = {key: decision_deadline(key) for key in keys}
     combined["gate_closure_utc"] = combined["delivery_date"].map(closures)
 
     # Drop everything illegal FIRST, then keep the freshest survivor. Selection
-    # can only ever choose among rows that already predate gate closure, so no
+    # can only ever choose among rows that already predate the deadline, so no
     # ordering mistake here can produce a leak.
     legal = combined[combined["issue_time_utc"] <= combined["gate_closure_utc"]]
     dropped = len(combined) - len(legal)
