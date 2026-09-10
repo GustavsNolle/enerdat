@@ -220,6 +220,35 @@ pins both cases.
 Negative means the candidate lost, and it is reported as a loss rather than an
 absolute value.
 
+### Measured result, and a negative one worth keeping
+
+A full year of BE, 6,572 scored intervals:
+
+| schedule | MAE MW | cost €m/yr | vs TSO |
+| --- | --- | --- | --- |
+| TSO forecast | 164.6 | 19.63 | 1.000 |
+| candidate, MW objective | 193.9 | 22.12 | 1.127 |
+| candidate, euro objective | 186.7 | 22.08 | **1.125** |
+
+**The euro objective is worth 0.2%.** The premise it rests on — that being short
+is punished harder than being long is rewarded — does not hold here:
+
+    cost of being long   (P_dayahead - P_long)+   = 20.82 EUR/MWh
+    cost of being short  (P_short - P_dayahead)+  = 21.01 EUR/MWh
+    implied tau                                   = 0.498
+
+Belgian imbalance pricing is near-symmetric, so τ sits at 0.5, and quantile
+regression at 0.5 is just median regression. The mechanism is intact — the
+candidate does shift long (45.5% of intervals against the TSO's 37.1%) and its
+signed bias falls from −37.6 MW to −6.6 MW — there is simply no asymmetry to
+exploit. The MAE gain that *did* appear is L1 versus L2, not the thesis.
+
+Worth testing in a dual-priced market with a genuine spread before concluding
+the idea is wrong; worth not claiming the edge exists until then.
+
+The TSO's own bias is the more interesting find: it over-forecasts BE offshore
+wind by **37.6 MW on average**, and is short 63% of intervals.
+
 The settlement period is derived from the data rather than assumed, because the
 market moved to quarter-hourly MTU mid-history and DST days contain an interval
 of a different length.

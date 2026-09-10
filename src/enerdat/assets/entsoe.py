@@ -51,15 +51,22 @@ def _to_long(frame, retrieved_at: pd.Timestamp) -> pd.DataFrame:
     on the right side of midnight.
     """
     if isinstance(frame, pd.Series):
-        frame = frame.to_frame(name="value")
+        # Keep the series' own name as the variable label, so single-series
+        # endpoints (day-ahead price, net position) are not all labelled the
+        # same thing in the lake.
+        frame = frame.to_frame(name=frame.name or "value")
 
     frame = frame.copy()
     frame.index = pd.to_datetime(frame.index, utc=True)
     frame.index.name = "valid_time_utc"
 
+    # melt refuses a value_name that matches an existing column, and a column
+    # legitimately called "value" is exactly what an unnamed series produces.
+    # Melt into a private name and rename after, so no input can trip it.
     long = (
         frame.reset_index()
-        .melt(id_vars="valid_time_utc", var_name="variable", value_name="value")
+        .melt(id_vars="valid_time_utc", var_name="variable", value_name="__value")
+        .rename(columns={"__value": "value"})
         .dropna(subset=["value"])
     )
     long["value"] = pd.to_numeric(long["value"], errors="coerce")

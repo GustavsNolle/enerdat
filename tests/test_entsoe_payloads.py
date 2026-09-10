@@ -90,3 +90,24 @@ def test_market_resolution_is_quarter_hourly():
         f"fixture resolution is {step}; the mart's hourly weather join assumes "
         "sub-hourly market data"
     )
+
+
+def test_a_named_series_keeps_its_name_as_the_variable():
+    """Single-series endpoints (day-ahead price, net position) come back as a
+    Series. Forcing the column to "value" collides with melt's value_name and
+    raises, and would leave every such dataset labelled identically.
+    """
+    index = pd.date_range("2026-07-01T00:00:00Z", periods=24, freq="1h")
+    series = pd.Series(range(24), index=index, name="day_ahead_price")
+
+    long = _to_long(series, RETRIEVED_AT)
+
+    assert set(long["variable"]) == {"day_ahead_price"}
+    assert len(long) == 24
+    assert pd.api.types.is_numeric_dtype(long["value"])
+
+
+def test_an_unnamed_series_still_converts():
+    index = pd.date_range("2026-07-01T00:00:00Z", periods=6, freq="1h")
+    long = _to_long(pd.Series(range(6), index=index), RETRIEVED_AT)
+    assert set(long["variable"]) == {"value"}
