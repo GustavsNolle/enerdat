@@ -11,7 +11,7 @@ from enerdat.config import (
     WEATHER_LEAD_DAYS_OPTIONS,
     WEATHER_VARIABLES,
 )
-from enerdat.partitions import daily_partitions, decision_deadline, delivery_window
+from enerdat.partitions import daily_partitions, delivery_window, interval_deadline
 from enerdat.resources import LakeResource, OpenMeteoResource
 
 
@@ -78,10 +78,12 @@ def openmeteo_archived_forecast(
     )
     combined["retrieved_at_utc"] = retrieved_at
 
-    # The deadline is per delivery day, so the legality of a given lead varies
-    # across the day.
-    closures = {key: decision_deadline(key) for key in keys}
-    combined["gate_closure_utc"] = combined["delivery_date"].map(closures)
+    # Per interval under the intraday horizon, per delivery day otherwise.
+    # Intraday deadlines sit only an hour before delivery, so every archived
+    # lead clears them comfortably and the freshest is always chosen; the
+    # filter still runs, because the horizon is configuration and the guarantee
+    # must not depend on which value it holds.
+    combined["gate_closure_utc"] = interval_deadline(combined["valid_time_utc"])
 
     # Drop everything illegal FIRST, then keep the freshest survivor. Selection
     # can only ever choose among rows that already predate the deadline, so no

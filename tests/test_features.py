@@ -133,3 +133,59 @@ def test_tso_forecast_is_admitted_only_when_the_deadline_allows_it():
     """
     selected = feature_columns(["tso_forecast_mw", "wind_speed_100m_v"])
     assert ("tso_forecast_mw" in selected) is USE_TSO_FORECAST_AS_FEATURE
+
+
+def test_outturn_lags_are_all_publishable_before_the_deadline():
+    """The intraday horizon's entire edge, and its entire risk.
+
+    An actual at T-k is published at T-k+ACTUALS_PUBLICATION_LAG and the
+    schedule for T is fixed at T-DECISION_LEAD, so k must be at least the sum.
+    A shorter lag is a straightforward leak wearing a plausible name.
+    """
+    from enerdat.config import ACTUAL_LAG_HOURS, MIN_ACTUAL_LAG
+
+    for hours in ACTUAL_LAG_HOURS:
+        assert pd.Timedelta(hours=hours) >= pd.Timedelta(MIN_ACTUAL_LAG), (
+            f"actual_lag{hours}h is not published by the time the schedule "
+            f"is fixed (needs >= {MIN_ACTUAL_LAG})"
+        )
+
+
+def test_outturn_features_are_refused_at_the_day_ahead_horizon():
+    """They do not exist yet at 18:00 on D-1, so the two horizons must not
+    silently share a feature set."""
+    import enerdat.assets.model as model
+
+    frame = pd.DataFrame({
+        "valid_time_utc": pd.date_range("2026-07-01T00:00:00Z", periods=48, freq="1h"),
+        "actual_mw": np.linspace(100, 200, 48),
+        "tso_forecast_mw": np.linspace(110, 190, 48),
+    })
+
+    original = model.HORIZON
+    try:
+        model.HORIZON = "day_ahead"
+        out = model.add_outturn_features(frame)
+        assert not [c for c in out.columns if c.startswith("actual_lag")]
+        model.HORIZON = "intraday"
+        out = model.add_outturn_features(frame)
+        assert [c for c in out.columns if c.startswith("actual_lag")]
+    finally:
+        model.HORIZON = original
+
+
+def test_a_too_short_lag_is_rejected_rather_than_built():
+    import enerdat.assets.model as model
+
+    frame = pd.DataFrame({
+        "valid_time_utc": pd.date_range("2026-07-01T00:00:00Z", periods=48, freq="1h"),
+        "actual_mw": np.linspace(100, 200, 48),
+        "tso_forecast_mw": np.linspace(110, 190, 48),
+    })
+    original = model.ACTUAL_LAG_HOURS
+    try:
+        model.ACTUAL_LAG_HOURS = (1,)          # not yet published
+        with pytest.raises(ValueError, match="not been published"):
+            model.add_outturn_features(frame)
+    finally:
+        model.ACTUAL_LAG_HOURS = original

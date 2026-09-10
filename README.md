@@ -182,6 +182,54 @@ are published by 18:00 on D−1, *after* the 12:00 gate closure this project
 treats as the decision point. We therefore beat the TSO using strictly less
 information than it had — which costs accuracy, but makes a win unambiguous.
 
+## Intraday horizon
+
+`HORIZON = "intraday"` moves the deadline from a wall-clock hour on D−1 to
+`DECISION_LEAD` before **each interval**. That is a change of kind, not degree:
+under `day_ahead` the schedule for 23:00 is fixed at the same instant as the one
+for 00:00; intraday it is fixed 23 hours later, and by then far more is known.
+
+It is the more faithful model. Imbalance settles against a BRP's *final*
+nominated position and continuous intraday trading runs until roughly an hour
+before delivery, so a day-ahead deadline describes a party that stops trading
+the evening before and watches its exposure accumulate.
+
+The gain is not fresher weather — Open-Meteo's archive is day-granular, so the
+freshest legal run is the same either way. It is **recent outturn**. At T−1h the
+fleet's output at T−2h is published, and short-horizon persistence is a far
+stronger predictor than any weather feature. `MIN_ACTUAL_LAG` derives what is
+admissible (`DECISION_LEAD + ACTUALS_PUBLICATION_LAG` = 2h) and
+`add_outturn_features` raises rather than builds a shorter one.
+
+### Result, and why the headline is not the finding
+
+A full year of BE, 6,548 scored intervals:
+
+| schedule | MAE MW | cost €m | vs TSO |
+| --- | --- | --- | --- |
+| TSO forecast | 164.7 | 19.52 | — |
+| **persistence (actual T−2h)** | 165.6 | **17.11** | **+2.41** |
+| model (intraday) | 137.3 | 17.40 | +2.12 |
+| perfect foresight | 0.0 | 0.00 | +19.52 |
+| schedule of zero | 757.2 | 18.17 | +1.35 |
+
+Intraday transforms the day-ahead result: the model goes from **costing 6.4%
+more than the TSO to saving €2.12m**, and beats it by 16.6% on MAE. Nothing
+beats perfect foresight, so the measure is sound.
+
+But **naive persistence saves more (€2.41m) than the model does**, while being
+one line of code. The model's 28 MW of MAE advantage over persistence does not
+convert into euros, because cost is driven by where the errors land relative to
+price, not by their size. Against the right baseline for an intraday forecast —
+persistence, not the day-ahead TSO forecast — the model buys accuracy and no
+value.
+
+Two caveats worth keeping. A zero schedule "saves" €1.35m, so some of every
+figure here is simply being long against BE's small positive day-ahead-to-
+imbalance spread. And the 2h lag is published *exactly* at the deadline: legal,
+but with zero headroom, so a minute of publication slippage would leak. Widening
+`ACTUAL_LAG_HOURS` to start at 3 would buy margin at some cost in skill.
+
 ## Training window
 
 Two separate knobs, and conflating them is easy:

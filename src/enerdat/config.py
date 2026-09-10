@@ -14,28 +14,19 @@ import datetime as dt
 
 # Bidding zone, as an entsoe-py alias.
 #
-# PL, chosen on measured price asymmetry after BE turned out to have none.
-# Three conditions have to hold at once and PL is the only zone scanned that
-# meets all three (see scripts/market_scan.py):
+# BE. It is the only zone scanned whose 14.1.D forecast and 16.1 metered actual
+# describe the same fleet (ratio 0.968, corr 0.953) AND whose settlement cost
+# measure is well posed -- a schedule of zero costs MORE than the TSO forecast
+# there, so no trivial strategy beats perfect foresight.
 #
-#   1. Publishes an imbalance price at bidding-zone level. DE_LU does not.
-#   2. Its 14.1.D forecast and 16.1 metered actual describe the same fleet.
-#      Measured over a full year: Solar ratio 0.945 at 0.989 correlation,
-#      Wind Onshore 0.923 at 0.946. NL fails this catastrophically.
-#   3. Imbalance pricing is ASYMMETRIC, which is what the euro objective
-#      exploits. Full year: c_long 54.38, c_short 397.35, tau 0.120, 7.31x --
-#      and all thirteen months sit below tau 0.34, so it is structural rather
-#      than seasonal. Being short costs 328-523 EUR/MWh in every month.
-#
-# BE met the first two and failed the third at tau 0.462, which is why the euro
-# objective was worth 0.2% there. Its result is kept in results/.
-ZONE = "PL"
+# PL was tried and abandoned. Its imbalance price sits above day-ahead 88.4% of
+# the time under single pricing, which makes cost linear in the schedule and
+# its optimum degenerate: bidding zero "saved" 5085m against perfect
+# foresight's 198m. See checks.cost_measure_is_well_posed.
+ZONE = "BE"
 
 # The series we are trying to predict, as ENTSO-E names it.
-# Poland's offshore fleet is only now commissioning -- 89 MW mean, and it fails
-# the scope check at 0.735 ratio. Onshore is the real fleet at 2625 MW mean,
-# roughly five times the scale of BE offshore.
-TARGET_TECHNOLOGY = "Wind Onshore"
+TARGET_TECHNOLOGY = "Wind Offshore"
 
 # ENTSO-E market time. Note this is a *market* convention, not a display
 # preference: delivery days are defined in it, so DST days have 23 or 25 hours.
@@ -89,6 +80,29 @@ GATE_CLOSURE_LOCAL = dt.time(12, 0)
 # would be optimistic.
 DECISION_TIME_LOCAL = dt.time(18, 0)
 
+# Which horizon the schedule is fixed at.
+#
+#   "day_ahead"  DECISION_TIME_LOCAL on D-1: one deadline for the whole
+#                delivery day, and the schedule for 23:00 is fixed at the same
+#                instant as the one for 00:00.
+#   "intraday"   DECISION_LEAD before each interval: a deadline PER INTERVAL.
+#
+# Intraday is the more faithful model. Imbalance settles against a BRP's final
+# nominated position, and continuous intraday trading runs until roughly an
+# hour before delivery -- so the day-ahead deadline describes a party that
+# stops trading the evening before and then watches its exposure accumulate.
+#
+# The change is not mainly about fresher weather. Open-Meteo's archive is
+# day-granular, so the freshest legal run is the same one either way. What
+# intraday unlocks is RECENT OUTTURN: at T-1h the fleet's output at T-2h has
+# been published, and short-horizon persistence is a far stronger predictor
+# than any weather feature. Lagged actuals are inadmissible at day-ahead and
+# admissible here, which is the whole point.
+HORIZON = "intraday"
+
+# How far before delivery the intraday schedule is fixed.
+DECISION_LEAD = dt.timedelta(hours=1)
+
 # Which archived weather runs to fetch, as Open-Meteo `previous_dayN` offsets.
 #
 # previous_dayN is the forecast for a timestamp taken from the run issued
@@ -116,6 +130,19 @@ WEATHER_LEAD_DAYS = max(WEATHER_LEAD_DAYS_OPTIONS)
 # generation with a lag. Training for delivery day D may therefore only use
 # intervals whose actuals had been published by D's gate closure.
 ACTUALS_PUBLICATION_LAG = dt.timedelta(hours=1)
+
+# Smallest lag of the outturn that is knowable when the schedule is fixed.
+#
+# An actual at T-k is published by T-k+ACTUALS_PUBLICATION_LAG, and the
+# schedule for T is fixed at T-DECISION_LEAD, so the lag is admissible only
+# when k >= DECISION_LEAD + ACTUALS_PUBLICATION_LAG. With both at one hour that
+# is two hours: the outturn at T-2h is usable, T-1h is not.
+MIN_ACTUAL_LAG = DECISION_LEAD + ACTUALS_PUBLICATION_LAG
+
+# Offsets of the outturn offered to the model, in hours before valid time.
+# Every one must be >= MIN_ACTUAL_LAG; feature selection asserts it rather than
+# trusting the list.
+ACTUAL_LAG_HOURS = (2, 3, 4, 6, 12, 24)
 
 # Walk-forward retraining cadence, in days. Refitting for every delivery day is
 # the purest form but costs a fit per day over a multi-year backfill; refitting

@@ -7,7 +7,9 @@ from dagster import AssetExecutionContext
 from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
+    DECISION_LEAD,
     DECISION_TIME_LOCAL,
+    HORIZON,
     GRID_POINTS,
     TARGET_TECHNOLOGY,
     WEATHER_LEAD_DAYS,
@@ -19,6 +21,19 @@ from enerdat.resources import LakeResource
 # Hour of DECISION_TIME_LOCAL, so the SQL deadline follows the config rather
 # than a literal that drifts out of step with it.
 _DECISION_HOUR = DECISION_TIME_LOCAL.hour
+
+# The deadline expression, which differs in KIND between horizons rather than
+# just in value: intraday is a fixed offset from each interval, day-ahead is a
+# wall-clock hour on the previous calendar day in market time.
+_DEADLINE_SQL = (
+    f"f.valid_time_utc - INTERVAL {int(DECISION_LEAD.total_seconds() // 60)} MINUTE"
+    if HORIZON == "intraday"
+    else (
+        "timezone('Europe/Brussels', "
+        "(timezone('Europe/Brussels', f.valid_time_utc)::DATE - INTERVAL 1 DAY)"
+        f" + INTERVAL {_DECISION_HOUR} HOUR)"
+    )
+)
 
 # Weather is summarised three ways, because averaging alone destroys the two
 # things that matter most.
@@ -148,12 +163,7 @@ issued AS (
 SELECT
     f.valid_time_utc,
     timezone('Europe/Brussels', f.valid_time_utc)::DATE      AS delivery_date,
-    -- the decision deadline for this delivery day, back in UTC
-    timezone(
-        'Europe/Brussels',
-        (timezone('Europe/Brussels', f.valid_time_utc)::DATE
-         - INTERVAL 1 DAY) + INTERVAL {_DECISION_HOUR} HOUR
-    )                                                        AS gate_closure_utc,
+    {_DEADLINE_SQL}                                          AS gate_closure_utc,
     f.tso_forecast_mw,
     a.actual_mw,
     a.actual_mw - f.tso_forecast_mw                          AS tso_error_mw,

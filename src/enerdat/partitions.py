@@ -8,7 +8,13 @@ from __future__ import annotations
 import dagster as dg
 import pandas as pd
 
-from enerdat.config import DECISION_TIME_LOCAL, MARKET_TZ, PARTITION_START
+from enerdat.config import (
+    DECISION_LEAD,
+    DECISION_TIME_LOCAL,
+    HORIZON,
+    MARKET_TZ,
+    PARTITION_START,
+)
 
 daily_partitions = dg.DailyPartitionsDefinition(
     start_date=PARTITION_START,
@@ -49,6 +55,28 @@ def dt_combine(date, time):
     import datetime as _dt
 
     return _dt.datetime.combine(date, time)
+
+
+def interval_deadline(valid_time_utc):
+    """The instant the schedule for a given interval is fixed.
+
+    Accepts a Timestamp or a Series and returns the same shape.
+
+    Under "intraday" this is per interval -- DECISION_LEAD before delivery --
+    which is the point of the horizon: the schedule for 23:00 is fixed 22 hours
+    later than the one for 01:00, and by then far more is known. Under
+    "day_ahead" every interval in a delivery day shares one deadline, so this
+    falls back to the per-day answer.
+    """
+    if HORIZON == "intraday":
+        return valid_time_utc - pd.Timedelta(DECISION_LEAD)
+
+    if isinstance(valid_time_utc, pd.Timestamp):
+        key = valid_time_utc.tz_convert(MARKET_TZ).date().isoformat()
+        return decision_deadline(key)
+
+    local_date = valid_time_utc.dt.tz_convert(MARKET_TZ).dt.date.astype(str)
+    return local_date.map(lambda k: decision_deadline(k))
 
 
 # Kept so older call sites and tests keep working; the deadline is the same

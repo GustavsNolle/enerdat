@@ -20,6 +20,10 @@ from dagster_duckdb import DuckDBResource
 
 from enerdat.config import (
     ACTUALS_PUBLICATION_LAG,
+    ACTUAL_LAG_HOURS,
+    DECISION_LEAD,
+    HORIZON,
+    MIN_ACTUAL_LAG,
     GRID_POINTS,
     MIN_TRAIN_DAYS,
     MODEL_OBJECTIVE,
@@ -89,6 +93,53 @@ def add_physics_features(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_outturn_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Recent outturn, and the TSO's recent error. Intraday only.
+
+    This is what the intraday horizon buys, and it is worth more than any
+    weather feature. At T minus DECISION_LEAD the fleet's output several hours
+    earlier has been published, and wind is strongly autocorrelated at short
+    horizons -- persistence alone is a serious forecaster over a few hours.
+
+    The TSO's recent error is knowable too, since both its forecast and the
+    outturn are public for past intervals, and that error is autocorrelated:
+    when the published forecast has been running high all afternoon it is
+    usually still running high now.
+
+    Nothing here is admissible at the day-ahead horizon, where none of these
+    values exist yet. add_lag_features refuses to build them unless
+    HORIZON == "intraday", so the two horizons cannot silently share features.
+    """
+    if HORIZON != "intraday":
+        return frame
+
+    out = frame.sort_values("valid_time_utc").copy()
+    step = out["valid_time_utc"].diff().median()
+    if pd.isna(step) or step <= pd.Timedelta(0):
+        return out
+
+    per_hour = pd.Timedelta(hours=1) / step
+    tso_error = out["actual_mw"] - out["tso_forecast_mw"]
+
+    for hours in ACTUAL_LAG_HOURS:
+        # Guard rather than trust the constant list.
+        if pd.Timedelta(hours=hours) < pd.Timedelta(MIN_ACTUAL_LAG):
+            raise ValueError(
+                f"ACTUAL_LAG_HOURS contains {hours}h, shorter than the "
+                f"{MIN_ACTUAL_LAG} that is knowable when the schedule is "
+                "fixed. That lag has not been published yet."
+            )
+        shift = int(round(hours * per_hour))
+        out[f"actual_lag{hours}h"] = out["actual_mw"].shift(shift)
+        out[f"tso_error_lag{hours}h"] = tso_error.shift(shift)
+
+    # Persistence relative to the published forecast: how far the outturn has
+    # been running from it, at the freshest lag available.
+    freshest = min(ACTUAL_LAG_HOURS)
+    out["persistence_gap"] = out[f"actual_lag{freshest}h"] - out["tso_forecast_mw"]
+    return out
+
+
 def add_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
     """Neighbouring hours, a local average, and a rate of change.
 
@@ -132,6 +183,11 @@ def feature_columns(available: list[str]) -> list[str]:
     for base in bases:
         columns += [f"{base}_t{step:+d}" for step in WEATHER_LAG_STEPS]
         columns += [f"{base}_roll3", f"{base}_delta"]
+
+    if HORIZON == "intraday":
+        for hours in ACTUAL_LAG_HOURS:
+            columns += [f"actual_lag{hours}h", f"tso_error_lag{hours}h"]
+        columns.append("persistence_gap")
 
     columns += ["hour_sin", "hour_cos", "month"]
 
@@ -353,6 +409,7 @@ def candidate_forecast(
     frame = add_calendar_features(frame)
     frame = add_physics_features(frame)
     frame = add_lag_features(frame)
+    frame = add_outturn_features(frame)
     features = feature_columns(list(frame.columns))
     if not features:
         raise dg.Failure(description="No usable feature columns in forecast_error.")
